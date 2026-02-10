@@ -42,7 +42,7 @@ Screenshots:
 
 Video recording:
   rodney start-video              Start recording video
-  rodney stop-video [file]        Stop recording and save MP4
+  rodney stop-video [file]        Stop and save (.gif default, .mp4 needs ffmpeg)
 
 Tabs:
   rodney pages                    List all pages/tabs

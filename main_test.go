@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"image/gif"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -761,5 +762,181 @@ func TestStopVideo_ProducesMP4WhenFfmpegAvailable(t *testing.T) {
 	// Frames dir should be cleaned up
 	if _, err := os.Stat(framesDir); !os.IsNotExist(err) {
 		t.Error("expected frames dir to be removed after stop-video")
+	}
+}
+
+// =====================
+// GIF recording tests
+// =====================
+
+func TestAssembleGIF_ProducesValidGIF(t *testing.T) {
+	dir := withTestStateDir(t)
+	framesDir := filepath.Join(dir, "video-frames")
+
+	// Capture real frames from animated page
+	page := navigateTo(t, "/animated")
+	stop := startVideoCapture(page, framesDir)
+	time.Sleep(1 * time.Second)
+	n := stop()
+
+	if n < 2 {
+		t.Fatalf("need at least 2 frames, got %d", n)
+	}
+
+	outputFile := filepath.Join(dir, "test-output.gif")
+	result, err := assembleGIF(framesDir, outputFile)
+	if err != nil {
+		t.Fatalf("assembleGIF failed: %v", err)
+	}
+
+	// File should exist and be non-empty
+	info, err := os.Stat(result.OutputFile)
+	if err != nil {
+		t.Fatalf("output file not created: %v", err)
+	}
+	if info.Size() == 0 {
+		t.Error("output file is empty")
+	}
+
+	// Should be a valid GIF (starts with GIF89a or GIF87a)
+	header := make([]byte, 6)
+	f, _ := os.Open(result.OutputFile)
+	f.Read(header)
+	f.Close()
+	if string(header[:3]) != "GIF" {
+		t.Errorf("not a GIF file, header: %q", string(header))
+	}
+
+	// Should have captured some frames
+	if result.InputFrames == 0 {
+		t.Error("expected non-zero InputFrames")
+	}
+	if result.UniqueFrames == 0 {
+		t.Error("expected non-zero UniqueFrames")
+	}
+}
+
+func TestAssembleGIF_DeduplicatesIdenticalFrames(t *testing.T) {
+	dir := withTestStateDir(t)
+	framesDir := filepath.Join(dir, "video-frames")
+	os.MkdirAll(framesDir, 0755)
+
+	// Write identical JPEG frames to simulate duplicate screencast output
+	// Use a real JPEG from a page capture for realistic data
+	page := navigateTo(t, "/")
+	stop := startVideoCapture(page, framesDir)
+	time.Sleep(200 * time.Millisecond)
+	stop()
+
+	// Read whatever frame we got and duplicate it
+	firstFrame, err := os.ReadFile(filepath.Join(framesDir, "frame_000000.jpeg"))
+	if err != nil {
+		t.Fatalf("no frame captured: %v", err)
+	}
+
+	// Clear and write 10 identical frames + metadata
+	os.RemoveAll(framesDir)
+	os.MkdirAll(framesDir, 0755)
+	metaFile, _ := os.Create(filepath.Join(framesDir, "meta.jsonl"))
+	for i := 0; i < 10; i++ {
+		os.WriteFile(filepath.Join(framesDir, fmt.Sprintf("frame_%06d.jpeg", i)), firstFrame, 0644)
+		fmt.Fprintf(metaFile, `{"idx":%d,"ts":%.6f}`+"\n", i, float64(1000)+float64(i)*0.033)
+	}
+	metaFile.Close()
+
+	outputFile := filepath.Join(dir, "dedup-test.gif")
+	result, err := assembleGIF(framesDir, outputFile)
+	if err != nil {
+		t.Fatalf("assembleGIF failed: %v", err)
+	}
+
+	t.Logf("Input: %d frames, Unique: %d frames", result.InputFrames, result.UniqueFrames)
+
+	// All 10 frames are identical, so should deduplicate to 1 unique frame
+	if result.UniqueFrames != 1 {
+		t.Errorf("expected 1 unique frame from 10 identical inputs, got %d", result.UniqueFrames)
+	}
+	if result.InputFrames != 10 {
+		t.Errorf("expected 10 input frames, got %d", result.InputFrames)
+	}
+}
+
+func TestAssembleGIF_DecodableWithStdlib(t *testing.T) {
+	dir := withTestStateDir(t)
+	framesDir := filepath.Join(dir, "video-frames")
+
+	page := navigateTo(t, "/animated")
+	stop := startVideoCapture(page, framesDir)
+	time.Sleep(1 * time.Second)
+	stop()
+
+	outputFile := filepath.Join(dir, "decode-test.gif")
+	_, err := assembleGIF(framesDir, outputFile)
+	if err != nil {
+		t.Fatalf("assembleGIF failed: %v", err)
+	}
+
+	// Decode the GIF with stdlib to verify it's valid
+	f, err := os.Open(outputFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	g, err := gif.DecodeAll(f)
+	if err != nil {
+		t.Fatalf("gif.DecodeAll failed: %v", err)
+	}
+
+	if len(g.Image) == 0 {
+		t.Error("GIF has no frames")
+	}
+	if len(g.Image) != len(g.Delay) {
+		t.Errorf("frame count (%d) != delay count (%d)", len(g.Image), len(g.Delay))
+	}
+
+	// Check dimensions match our viewport
+	bounds := g.Image[0].Bounds()
+	if bounds.Dx() == 0 || bounds.Dy() == 0 {
+		t.Errorf("first frame has zero dimensions: %v", bounds)
+	}
+
+	// All delays should be positive
+	for i, d := range g.Delay {
+		if d <= 0 {
+			t.Errorf("frame %d has non-positive delay: %d", i, d)
+		}
+	}
+}
+
+func TestStopVideo_DetectsGIFExtension(t *testing.T) {
+	dir := withTestStateDir(t)
+	framesDir := filepath.Join(dir, "video-frames")
+
+	page := navigateTo(t, "/animated")
+	stop := startVideoCapture(page, framesDir)
+	time.Sleep(1 * time.Second)
+	stop()
+
+	s := &State{DebugURL: "ws://fake", ChromePID: 99999, VideoRecording: true, VideoDir: framesDir}
+	saveState(s)
+
+	outputFile := filepath.Join(dir, "result.gif")
+	result, err := stopVideo(outputFile)
+	if err != nil {
+		t.Fatalf("stopVideo failed: %v", err)
+	}
+
+	if result.OutputFile == "" {
+		t.Fatal("expected OutputFile to be set")
+	}
+
+	// Should be a valid GIF
+	header := make([]byte, 6)
+	f, _ := os.Open(result.OutputFile)
+	f.Read(header)
+	f.Close()
+	if string(header[:3]) != "GIF" {
+		t.Errorf("expected GIF file for .gif extension, got header: %q", string(header))
 	}
 }

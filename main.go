@@ -1,10 +1,16 @@
 package main
 
 import (
+	"bytes"
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color/palette"
+	"image/draw"
+	"image/gif"
+	_ "image/jpeg"
 	"io"
 	"net"
 	"net/http"
@@ -13,6 +19,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -899,8 +906,9 @@ func cmdStartVideo(args []string) {
 
 // VideoResult holds the result of stop-video.
 type VideoResult struct {
-	FrameCount int
-	OutputFile string // empty if ffmpeg not available
+	FrameCount   int
+	UniqueFrames int    // for GIF: frames after deduplication
+	OutputFile   string // empty if assembly failed
 }
 
 // stopVideo stops recording, optionally assembles video, clears state.
@@ -918,12 +926,19 @@ func stopVideo(outputFile string) (*VideoResult, error) {
 
 	result := &VideoResult{FrameCount: frameCount}
 
-	// Try to assemble video with ffmpeg if we have frames
+	// Assemble output if we have frames
 	if frameCount > 0 && outputFile != "" {
-		if assembled, err := assembleVideo(framesDir, outputFile); err == nil {
-			result.OutputFile = assembled
+		if strings.HasSuffix(strings.ToLower(outputFile), ".gif") {
+			if gifResult, err := assembleGIF(framesDir, outputFile); err == nil {
+				result.OutputFile = gifResult.OutputFile
+				result.UniqueFrames = gifResult.UniqueFrames
+			}
+		} else {
+			if assembled, err := assembleVideo(framesDir, outputFile); err == nil {
+				result.OutputFile = assembled
+			}
+			// Non-fatal if ffmpeg fails
 		}
-		// Non-fatal if ffmpeg fails
 	}
 
 	// Clean up: remove frames dir
@@ -942,7 +957,7 @@ func cmdStopVideo(args []string) {
 	if len(args) > 0 {
 		outputFile = args[0]
 	} else {
-		outputFile = nextAvailableFile("recording", ".mp4")
+		outputFile = nextAvailableFile("recording", ".gif")
 	}
 
 	result, err := stopVideo(outputFile)
@@ -951,9 +966,13 @@ func cmdStopVideo(args []string) {
 	}
 
 	if result.OutputFile != "" {
-		fmt.Printf("Saved %s (%d frames)\n", result.OutputFile, result.FrameCount)
+		if result.UniqueFrames > 0 && result.UniqueFrames < result.FrameCount {
+			fmt.Printf("Saved %s (%d frames, %d unique)\n", result.OutputFile, result.FrameCount, result.UniqueFrames)
+		} else {
+			fmt.Printf("Saved %s (%d frames)\n", result.OutputFile, result.FrameCount)
+		}
 	} else if result.FrameCount > 0 {
-		fmt.Printf("Captured %d frames (ffmpeg not available for MP4 assembly)\n", result.FrameCount)
+		fmt.Printf("Captured %d frames but assembly failed\n", result.FrameCount)
 	} else {
 		fmt.Println("No frames captured")
 	}
@@ -1047,6 +1066,141 @@ func assembleVariableFPS(ffmpeg, framesDir, outputFile string, metaData []byte) 
 		return "", fmt.Errorf("ffmpeg failed: %v: %s", err, output)
 	}
 	return outputFile, nil
+}
+
+// GIFResult holds stats from GIF assembly.
+type GIFResult struct {
+	OutputFile   string
+	InputFrames  int
+	UniqueFrames int
+}
+
+// assembleGIF creates an animated GIF from JPEG frames with frame deduplication.
+// Identical consecutive frames are merged into a single frame with extended duration.
+func assembleGIF(framesDir, outputFile string) (*GIFResult, error) {
+	// Read metadata for frame timing
+	metaPath := filepath.Join(framesDir, "meta.jsonl")
+	metaData, _ := os.ReadFile(metaPath)
+
+	type frameMeta struct {
+		Idx int     `json:"idx"`
+		Ts  float64 `json:"ts"`
+	}
+	var metas []frameMeta
+	if len(metaData) > 0 {
+		for _, line := range strings.Split(strings.TrimSpace(string(metaData)), "\n") {
+			var fm frameMeta
+			if json.Unmarshal([]byte(line), &fm) == nil {
+				metas = append(metas, fm)
+			}
+		}
+	}
+
+	// List frame files in order
+	entries, err := os.ReadDir(framesDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read frames dir: %w", err)
+	}
+	var frameFiles []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "frame_") && strings.HasSuffix(e.Name(), ".jpeg") {
+			frameFiles = append(frameFiles, filepath.Join(framesDir, e.Name()))
+		}
+	}
+	sort.Strings(frameFiles)
+
+	if len(frameFiles) == 0 {
+		return nil, fmt.Errorf("no frames to assemble")
+	}
+
+	// Build timing lookup: index -> duration in centiseconds (1/100 sec)
+	frameDurations := make(map[int]int) // frame index -> delay in centiseconds
+	for i := 0; i < len(metas)-1; i++ {
+		dur := metas[i+1].Ts - metas[i].Ts
+		if dur <= 0 {
+			dur = 0.033
+		}
+		cs := int(dur*100 + 0.5) // convert to centiseconds, rounded
+		if cs < 2 {
+			cs = 2 // GIF minimum delay is 2cs (20ms) in most viewers
+		}
+		frameDurations[metas[i].Idx] = cs
+	}
+
+	// Process frames: decode JPEG, quantize to paletted, deduplicate
+	pal := palette.Plan9
+	var gifImages []*image.Paletted
+	var gifDelays []int
+	var prevPix []byte
+	inputCount := len(frameFiles)
+
+	for i, path := range frameFiles {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+
+		img, _, err := image.Decode(bytes.NewReader(data))
+		if err != nil {
+			continue
+		}
+
+		// Quantize to 256-color paletted image
+		bounds := img.Bounds()
+		paletted := image.NewPaletted(bounds, pal)
+		draw.FloydSteinberg.Draw(paletted, bounds, img, image.Point{})
+
+		// Determine this frame's duration
+		delay := 3 // default 30ms
+		// Extract index from filename for metadata lookup
+		base := filepath.Base(path)
+		if idx, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(base, "frame_"), ".jpeg")); err == nil {
+			if d, ok := frameDurations[idx]; ok {
+				delay = d
+			}
+		}
+		// Last frame gets default delay if not in metadata
+		if i == len(frameFiles)-1 && delay == 3 {
+			delay = 10 // 100ms for last frame
+		}
+
+		// Deduplicate: compare paletted pixels
+		if prevPix != nil && bytes.Equal(paletted.Pix, prevPix) {
+			// Same as previous frame — extend its delay
+			gifDelays[len(gifDelays)-1] += delay
+		} else {
+			gifImages = append(gifImages, paletted)
+			gifDelays = append(gifDelays, delay)
+			prevPix = make([]byte, len(paletted.Pix))
+			copy(prevPix, paletted.Pix)
+		}
+	}
+
+	if len(gifImages) == 0 {
+		return nil, fmt.Errorf("no valid frames decoded")
+	}
+
+	// Write GIF
+	f, err := os.Create(outputFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer f.Close()
+
+	err = gif.EncodeAll(f, &gif.GIF{
+		Image:     gifImages,
+		Delay:     gifDelays,
+		LoopCount: 0, // loop forever
+	})
+	if err != nil {
+		return nil, fmt.Errorf("GIF encoding failed: %w", err)
+	}
+
+	return &GIFResult{
+		OutputFile:   outputFile,
+		InputFrames:  inputCount,
+		UniqueFrames: len(gifImages),
+	}, nil
 }
 
 // startVideoCapture begins CDP screencast on the given page, writing JPEG frames
