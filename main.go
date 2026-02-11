@@ -302,8 +302,10 @@ func cmdStart(args []string) {
 
 	if bin := os.Getenv("ROD_CHROME_BIN"); bin != "" {
 		l = l.Bin(bin)
-	} else if bin, ok := findChrome(); ok {
-		l = l.Bin(bin)
+	} else if os.Getenv("RODNEY_USE_ROD_CHROME") == "" {
+		if bin, ok := findChrome(); ok {
+			l = l.Bin(bin)
+		}
 	}
 
 	// Detect authenticated proxy and launch helper if needed
