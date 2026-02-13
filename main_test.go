@@ -48,6 +48,7 @@ func TestMain(m *testing.M) {
 	mux.HandleFunc("/download", handleDownload)
 	mux.HandleFunc("/testfile.txt", handleTestFile)
 	mux.HandleFunc("/empty", handleEmpty)
+	mux.HandleFunc("/spa", handleSPA)
 	server := httptest.NewServer(mux)
 
 	env = &testEnv{browser: browser, server: server}
@@ -624,6 +625,220 @@ func TestDownload_ImgSrc(t *testing.T) {
 	}
 	if *src != "/testfile.txt" {
 		t.Errorf("expected '/testfile.txt', got %q", *src)
+	}
+}
+
+// =====================
+// SPA hash routing tests
+// =====================
+
+func handleSPA(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<!DOCTYPE html>
+<html lang="en">
+<head><title>SPA App</title></head>
+<body>
+  <nav>
+    <a href="#home" id="nav-home">Home</a>
+    <a href="#page2" id="nav-page2">Page 2</a>
+    <a href="#page3" id="nav-page3">Page 3</a>
+  </nav>
+  <div id="content"></div>
+  <script>
+    var pages = {
+      home:  '<h1>Home Page</h1><p>Welcome to the SPA</p>',
+      page2: '<h1>Page Two</h1><p>This is the second page</p>',
+      page3: '<h1>Page Three</h1><p>This is the third page</p>'
+    };
+    function route() {
+      var hash = location.hash.replace('#', '') || 'home';
+      document.getElementById('content').innerHTML = pages[hash] || '<h1>Not Found</h1>';
+      document.title = 'SPA - ' + hash;
+    }
+    window.addEventListener('hashchange', route);
+    route();
+  </script>
+</body>
+</html>`))
+}
+
+func TestSPA_OpenWithFragment(t *testing.T) {
+	// Open the SPA directly at #page2 and verify the correct content renders
+	page := env.browser.MustPage(env.server.URL + "/spa#page2")
+	page.MustWaitLoad()
+	t.Cleanup(func() { page.MustClose() })
+
+	// Wait for the JS router to execute
+	page.MustWaitStable()
+
+	// Verify the URL contains the fragment
+	info, err := page.Info()
+	if err != nil {
+		t.Fatalf("failed to get page info: %v", err)
+	}
+	if !strings.HasSuffix(info.URL, "/spa#page2") {
+		t.Errorf("expected URL ending with /spa#page2, got %s", info.URL)
+	}
+
+	// Verify the title was set by the SPA router
+	if info.Title != "SPA - page2" {
+		t.Errorf("expected title 'SPA - page2', got %q", info.Title)
+	}
+
+	// Verify the correct content is rendered
+	h1, err := page.Element("h1")
+	if err != nil {
+		t.Fatalf("h1 not found: %v", err)
+	}
+	text, _ := h1.Text()
+	if text != "Page Two" {
+		t.Errorf("expected h1 'Page Two', got %q", text)
+	}
+}
+
+func TestSPA_OpenWithFragment_Page3(t *testing.T) {
+	// Open the SPA directly at #page3
+	page := env.browser.MustPage(env.server.URL + "/spa#page3")
+	page.MustWaitLoad()
+	t.Cleanup(func() { page.MustClose() })
+
+	page.MustWaitStable()
+
+	info, err := page.Info()
+	if err != nil {
+		t.Fatalf("failed to get page info: %v", err)
+	}
+	if info.Title != "SPA - page3" {
+		t.Errorf("expected title 'SPA - page3', got %q", info.Title)
+	}
+
+	h1, err := page.Element("h1")
+	if err != nil {
+		t.Fatalf("h1 not found: %v", err)
+	}
+	text, _ := h1.Text()
+	if text != "Page Three" {
+		t.Errorf("expected h1 'Page Three', got %q", text)
+	}
+}
+
+func TestSPA_DefaultRoute(t *testing.T) {
+	// Open the SPA without a fragment - should default to home
+	page := navigateTo(t, "/spa")
+	page.MustWaitStable()
+
+	info, err := page.Info()
+	if err != nil {
+		t.Fatalf("failed to get page info: %v", err)
+	}
+	if info.Title != "SPA - home" {
+		t.Errorf("expected title 'SPA - home', got %q", info.Title)
+	}
+
+	h1, err := page.Element("h1")
+	if err != nil {
+		t.Fatalf("h1 not found: %v", err)
+	}
+	text, _ := h1.Text()
+	if text != "Home Page" {
+		t.Errorf("expected h1 'Home Page', got %q", text)
+	}
+}
+
+func TestSPA_NavigateByClick(t *testing.T) {
+	// Start on the default home page, then click to navigate to page2
+	page := navigateTo(t, "/spa")
+	page.MustWaitStable()
+
+	// Click the Page 2 nav link
+	nav2 := page.MustElement("#nav-page2")
+	nav2.MustClick()
+
+	// Wait for the hash change to take effect
+	page.MustWaitStable()
+
+	// Verify URL updated
+	info, err := page.Info()
+	if err != nil {
+		t.Fatalf("failed to get page info: %v", err)
+	}
+	if !strings.HasSuffix(info.URL, "/spa#page2") {
+		t.Errorf("expected URL ending with /spa#page2, got %s", info.URL)
+	}
+
+	// Verify content changed
+	h1, err := page.Element("h1")
+	if err != nil {
+		t.Fatalf("h1 not found: %v", err)
+	}
+	text, _ := h1.Text()
+	if text != "Page Two" {
+		t.Errorf("expected h1 'Page Two' after click, got %q", text)
+	}
+
+	// Verify title updated
+	if info.Title != "SPA - page2" {
+		t.Errorf("expected title 'SPA - page2', got %q", info.Title)
+	}
+}
+
+func TestSPA_NavigateMultiplePages(t *testing.T) {
+	// Navigate through multiple SPA pages by clicking
+	page := navigateTo(t, "/spa")
+	page.MustWaitStable()
+
+	// Go to page2
+	page.MustElement("#nav-page2").MustClick()
+	page.MustWaitStable()
+	h1, _ := page.Element("h1")
+	text, _ := h1.Text()
+	if text != "Page Two" {
+		t.Errorf("expected 'Page Two', got %q", text)
+	}
+
+	// Go to page3
+	page.MustElement("#nav-page3").MustClick()
+	page.MustWaitStable()
+	h1, _ = page.Element("h1")
+	text, _ = h1.Text()
+	if text != "Page Three" {
+		t.Errorf("expected 'Page Three', got %q", text)
+	}
+
+	// Go back to home
+	page.MustElement("#nav-home").MustClick()
+	page.MustWaitStable()
+	h1, _ = page.Element("h1")
+	text, _ = h1.Text()
+	if text != "Home Page" {
+		t.Errorf("expected 'Home Page', got %q", text)
+	}
+}
+
+func TestSPA_JSHashNavigation(t *testing.T) {
+	// Navigate by setting location.hash via JS (simulates programmatic navigation)
+	page := navigateTo(t, "/spa")
+	page.MustWaitStable()
+
+	// Change hash via JavaScript
+	page.MustEval(`() => { location.hash = 'page3'; }`)
+	page.MustWaitStable()
+
+	info, err := page.Info()
+	if err != nil {
+		t.Fatalf("failed to get page info: %v", err)
+	}
+	if !strings.HasSuffix(info.URL, "/spa#page3") {
+		t.Errorf("expected URL ending with /spa#page3, got %s", info.URL)
+	}
+
+	h1, err := page.Element("h1")
+	if err != nil {
+		t.Fatalf("h1 not found: %v", err)
+	}
+	text, _ := h1.Text()
+	if text != "Page Three" {
+		t.Errorf("expected 'Page Three' after JS navigation, got %q", text)
 	}
 }
 
