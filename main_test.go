@@ -959,6 +959,121 @@ func TestAssert_ValueFormatting_MatchesJSCommand(t *testing.T) {
 	}
 }
 
+// =====================
+// assert --message tests
+// =====================
+
+func TestParseAssertArgs_ExprOnly(t *testing.T) {
+	expr, expected, message := parseAssertArgs([]string{"document.title"})
+	if expr != "document.title" {
+		t.Errorf("expr = %q, want %q", expr, "document.title")
+	}
+	if expected != nil {
+		t.Errorf("expected should be nil, got %q", *expected)
+	}
+	if message != "" {
+		t.Errorf("message should be empty, got %q", message)
+	}
+}
+
+func TestParseAssertArgs_ExprAndExpected(t *testing.T) {
+	expr, expected, message := parseAssertArgs([]string{"document.title", "Dashboard"})
+	if expr != "document.title" {
+		t.Errorf("expr = %q, want %q", expr, "document.title")
+	}
+	if expected == nil || *expected != "Dashboard" {
+		t.Errorf("expected = %v, want %q", expected, "Dashboard")
+	}
+	if message != "" {
+		t.Errorf("message should be empty, got %q", message)
+	}
+}
+
+func TestParseAssertArgs_MessageLong(t *testing.T) {
+	expr, expected, message := parseAssertArgs([]string{"document.title", "--message", "Page title check"})
+	if expr != "document.title" {
+		t.Errorf("expr = %q, want %q", expr, "document.title")
+	}
+	if expected != nil {
+		t.Errorf("expected should be nil for truthy with --message, got %q", *expected)
+	}
+	if message != "Page title check" {
+		t.Errorf("message = %q, want %q", message, "Page title check")
+	}
+}
+
+func TestParseAssertArgs_MessageShort(t *testing.T) {
+	expr, expected, message := parseAssertArgs([]string{"document.title", "-m", "Title check"})
+	if expr != "document.title" {
+		t.Errorf("expr = %q, want %q", expr, "document.title")
+	}
+	if expected != nil {
+		t.Errorf("expected should be nil, got %q", *expected)
+	}
+	if message != "Title check" {
+		t.Errorf("message = %q, want %q", message, "Title check")
+	}
+}
+
+func TestParseAssertArgs_EqualityWithMessage(t *testing.T) {
+	expr, expected, message := parseAssertArgs([]string{"document.title", "Dashboard", "--message", "Wrong page"})
+	if expr != "document.title" {
+		t.Errorf("expr = %q, want %q", expr, "document.title")
+	}
+	if expected == nil || *expected != "Dashboard" {
+		t.Errorf("expected = %v, want %q", expected, "Dashboard")
+	}
+	if message != "Wrong page" {
+		t.Errorf("message = %q, want %q", message, "Wrong page")
+	}
+}
+
+func TestParseAssertArgs_MessageBeforeExpr(t *testing.T) {
+	// --message can appear anywhere; positional args still work
+	expr, expected, message := parseAssertArgs([]string{"-m", "Check", "document.title", "Home"})
+	if expr != "document.title" {
+		t.Errorf("expr = %q, want %q", expr, "document.title")
+	}
+	if expected == nil || *expected != "Home" {
+		t.Errorf("expected = %v, want %q", expected, "Home")
+	}
+	if message != "Check" {
+		t.Errorf("message = %q, want %q", message, "Check")
+	}
+}
+
+func TestFormatAssertFail_TruthyNoMessage(t *testing.T) {
+	got := formatAssertFail("null", nil, "")
+	if got != "fail: got null" {
+		t.Errorf("got %q, want %q", got, "fail: got null")
+	}
+}
+
+func TestFormatAssertFail_TruthyWithMessage(t *testing.T) {
+	got := formatAssertFail("null", nil, "User should be logged in")
+	if got != "fail: User should be logged in (got null)" {
+		t.Errorf("got %q, want %q", got, "fail: User should be logged in (got null)")
+	}
+}
+
+func TestFormatAssertFail_EqualityNoMessage(t *testing.T) {
+	expected := "Dashboard"
+	got := formatAssertFail("Task Tracker", &expected, "")
+	want := `fail: got "Task Tracker", expected "Dashboard"`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestFormatAssertFail_EqualityWithMessage(t *testing.T) {
+	expected := "Dashboard"
+	got := formatAssertFail("Task Tracker", &expected, "Wrong page loaded")
+	want := `fail: Wrong page loaded (got "Task Tracker", expected "Dashboard")`
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
 func TestInsecureFlag_WithSelfSignedCert(t *testing.T) {
 	// Create HTTPS server with self-signed certificate
 	mux := http.NewServeMux()

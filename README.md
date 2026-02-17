@@ -264,7 +264,7 @@ rodney ax-find --role banner --name "Nonexistent"
 
 ### `assert` — assert a JavaScript expression
 
-With one argument, checks that the expression is truthy. With two arguments, checks that the expression's value equals the expected string.
+With one argument, checks that the expression is truthy. With two arguments, checks that the expression's value equals the expected string. Use `--message` / `-m` to set a custom failure message.
 
 ```bash
 # Truthy mode — check that expression evaluates to a truthy value
@@ -286,6 +286,16 @@ rodney assert 'document.title' 'Wrong Title'
 ```
 
 The expression is evaluated the same way as `rodney js` — the result is converted to its string representation before comparison. This means `rodney assert 'document.title' 'Dashboard'` compares the unquoted string, and `rodney assert '1 + 2' '3'` compares the number as a string.
+
+Use `--message` (or `-m`) to add a human-readable description to the failure output:
+
+```bash
+rodney assert 'document.querySelector(".logged-in")' -m "User should be logged in"
+# On failure: "fail: User should be logged in (got null)"
+
+rodney assert 'document.title' 'Dashboard' --message "Wrong page loaded"
+# On failure: 'fail: Wrong page loaded (got "Home", expected "Dashboard")'
+```
 
 ### Combining checks in a shell script
 
@@ -415,7 +425,7 @@ The tool uses the [rod](https://github.com/go-rod/rod) Go library which communic
 | `exists` | `<selector>` | Check element exists (exit 1 if not) |
 | `count` | `<selector>` | Count matching elements |
 | `visible` | `<selector>` | Check element visible (exit 1 if not) |
-| `assert` | `<expr> [expected]` | Assert JS expression is truthy or equals expected (exit 1 if not) |
+| `assert` | `<expr> [expected] [-m msg]` | Assert JS expression is truthy or equals expected (exit 1 if not) |
 | `ax-tree` | `[--depth N] [--json]` | Dump accessibility tree |
 | `ax-find` | `[--name N] [--role R] [--json]` | Find accessible nodes |
 | `ax-node` | `<selector> [--json]` | Show element accessibility info |

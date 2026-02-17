@@ -158,27 +158,60 @@ http://127.0.0.1:18092/
 pass
 ```
 
+## Custom failure messages with --message
+
+The `--message` (or `-m`) flag adds a human-readable label to the failure output. The diagnostic details (actual vs expected) are still included in parentheses.
+
+```bash
+./rodney assert "document.querySelector('.nonexistent')" -m "User should be logged in"; echo "exit code: $?"
+```
+
+```output
+fail: User should be logged in (got null)
+exit code: 1
+```
+
+```bash
+./rodney assert "document.title" "Dashboard" --message "Wrong page loaded"; echo "exit code: $?"
+```
+
+```output
+fail: Wrong page loaded (got "Task Tracker", expected "Dashboard")
+exit code: 1
+```
+
+When the assertion passes, the message is not shown — only "pass" is printed:
+
+```bash
+./rodney assert "document.title" "Task Tracker" -m "Wrong page" && echo "exit code: $?"
+```
+
+```output
+pass
+exit code: 0
+```
+
 ## Combining assert with other check commands
 
-The `assert` command uses exit code 1 for failures, just like `exists`, `visible`, and `ax-find`. This means it works naturally with the `check` helper pattern for running multiple assertions without aborting on the first failure.
+The `assert` command uses exit code 1 for failures, just like `exists`, `visible`, and `ax-find`. This means it works naturally with the `check` helper pattern for running multiple assertions without aborting on the first failure. Adding `-m` makes the output self-documenting.
 
 ```bash
 FAIL=0
 check() {
-    "$@" 2>/dev/null || { echo "FAIL: $*"; FAIL=1; }
+    "$@" 2>/dev/null || { FAIL=1; }
 }
 
 # These pass
 check ./rodney exists "h1"
 check ./rodney visible "h1"
-check ./rodney assert "document.title" "Task Tracker"
-check ./rodney assert "document.querySelectorAll('.task').length" "3"
-check ./rodney assert "document.querySelector('.logged-in').dataset.user" "alice"
+check ./rodney assert "document.title" "Task Tracker" -m "Title should be Task Tracker"
+check ./rodney assert "document.querySelectorAll('.task').length" "3" -m "Should have 3 tasks"
+check ./rodney assert "document.querySelector('.logged-in').dataset.user" "alice" -m "Should be logged in as alice"
 
 # These fail
-check ./rodney assert "document.title" "Wrong Title"
-check ./rodney assert "document.querySelectorAll('.task').length" "10"
-check ./rodney assert "document.querySelector('.nonexistent')"
+check ./rodney assert "document.title" "Wrong Title" -m "Wrong page loaded"
+check ./rodney assert "document.querySelectorAll('.task').length" "10" -m "Expected 10 tasks"
+check ./rodney assert "document.querySelector('.nonexistent')" -m "Missing element"
 
 if [ "$FAIL" -ne 0 ]; then
     echo "---"
@@ -195,17 +228,14 @@ true
 pass
 pass
 pass
-fail: got "Task Tracker", expected "Wrong Title"
-FAIL: ./rodney assert document.title Wrong Title
-fail: got "3", expected "10"
-FAIL: ./rodney assert document.querySelectorAll('.task').length 10
-fail: got null
-FAIL: ./rodney assert document.querySelector('.nonexistent')
+fail: Wrong page loaded (got "Task Tracker", expected "Wrong Title")
+fail: Expected 10 tasks (got "3", expected "10")
+fail: Missing element (got null)
 ---
 Some checks failed
 ```
 
-All five passing checks ran silently, while the three failing checks printed diagnostics with the actual vs expected values. The script collected all failures before reporting, rather than aborting on the first one.
+The five passing checks ran silently, while the three failing checks printed self-describing messages with diagnostic details. The `--message` flag makes it immediately clear *what* failed without having to decode the raw JS expression.
 
 Stop the browser.
 

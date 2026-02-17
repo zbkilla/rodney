@@ -54,7 +54,7 @@ Element checks:
   rodney exists <selector>        Check if element exists (exit 1 if not)
   rodney count <selector>         Count matching elements
   rodney visible <selector>       Check if element is visible (exit 1 if not)
-  rodney assert <expr> [expected] Assert JS expression is truthy or equals expected
+  rodney assert <expr> [expected] [-m msg]  Assert JS expression (truthy or equality)
 
 Accessibility:
   rodney ax-tree [--depth N] [--json]       Dump accessibility tree
