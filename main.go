@@ -201,6 +201,8 @@ func main() {
 		cmdForward(args)
 	case "reload":
 		cmdReload(args)
+	case "clear-cache":
+		cmdClearCache(args)
 	case "url":
 		cmdURL(args)
 	case "title":
@@ -505,10 +507,33 @@ func cmdForward(args []string) {
 }
 
 func cmdReload(args []string) {
+	hard := false
+	for _, a := range args {
+		if a == "--hard" {
+			hard = true
+		}
+	}
 	_, _, page := withPage()
-	page.MustReload()
+	if hard {
+		// CDP Page.reload with ignoreCache (equivalent to Shift+Refresh)
+		err := (proto.PageReload{IgnoreCache: true}).Call(page)
+		if err != nil {
+			fatal("reload failed: %v", err)
+		}
+	} else {
+		page.MustReload()
+	}
 	page.MustWaitLoad()
 	fmt.Println("Reloaded")
+}
+
+func cmdClearCache(args []string) {
+	_, _, page := withPage()
+	err := (proto.NetworkClearBrowserCache{}).Call(page)
+	if err != nil {
+		fatal("clear cache failed: %v", err)
+	}
+	fmt.Println("Browser cache cleared")
 }
 
 func cmdURL(args []string) {

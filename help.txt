@@ -9,7 +9,8 @@ Navigation:
   rodney open <url>               Navigate to URL
   rodney back                     Go back in history
   rodney forward                  Go forward in history
-  rodney reload                   Reload current page
+  rodney reload [--hard]          Reload page (--hard bypasses cache)
+  rodney clear-cache              Clear the browser cache
 
 Page info:
   rodney url                      Print current URL
