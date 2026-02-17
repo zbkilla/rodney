@@ -28,6 +28,54 @@ var helpText string
 
 var version = "dev"
 
+// scopeMode determines whether to use a local or global state directory.
+type scopeMode int
+
+const (
+	scopeAuto   scopeMode = iota // auto-detect: local if .rodney/state.json exists in cwd, else global
+	scopeLocal                   // force local (./.rodney/)
+	scopeGlobal                  // force global (~/.rodney/)
+)
+
+// activeStateDir is set once at startup based on --local/--global flags.
+var activeStateDir string
+
+// extractScopeArgs scans args for --local/--global, removes them, and returns the mode.
+// If both appear, the last one wins.
+func extractScopeArgs(args []string) (scopeMode, []string) {
+	mode := scopeAuto
+	var filtered []string
+	for _, arg := range args {
+		switch arg {
+		case "--local":
+			mode = scopeLocal
+		case "--global":
+			mode = scopeGlobal
+		default:
+			filtered = append(filtered, arg)
+		}
+	}
+	return mode, filtered
+}
+
+// resolveStateDir determines the state directory based on scope mode and working directory.
+func resolveStateDir(mode scopeMode, workingDir string) string {
+	switch mode {
+	case scopeLocal:
+		return filepath.Join(workingDir, ".rodney")
+	case scopeGlobal:
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".rodney")
+	default: // scopeAuto
+		localDir := filepath.Join(workingDir, ".rodney")
+		if _, err := os.Stat(filepath.Join(localDir, "state.json")); err == nil {
+			return localDir
+		}
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, ".rodney")
+	}
+}
+
 // State persisted between CLI invocations
 type State struct {
 	DebugURL    string `json:"debug_url"`
@@ -39,6 +87,10 @@ type State struct {
 }
 
 func stateDir() string {
+	if activeStateDir != "" {
+		return activeStateDir
+	}
+	// Fallback for when activeStateDir hasn't been set (e.g. tests)
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".rodney")
 }
@@ -114,8 +166,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	cmd := os.Args[1]
-	args := os.Args[2:]
+	// Extract --local/--global from all args before dispatching
+	mode, cleanedArgs := extractScopeArgs(os.Args[1:])
+	if len(cleanedArgs) == 0 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	wd, _ := os.Getwd()
+	activeStateDir = resolveStateDir(mode, wd)
+
+	cmd := cleanedArgs[0]
+	args := cleanedArgs[1:]
 
 	if cmd == "--version" {
 		fmt.Println(version)

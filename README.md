@@ -156,6 +156,39 @@ print(f'PASS: all {len(buttons)} buttons have accessible names')
 "
 ```
 
+### Directory-scoped sessions
+
+By default, Rodney stores state globally in `~/.rodney/`. You can instead create a session scoped to the current directory with `--local`:
+
+```bash
+rodney start --local          # State stored in ./.rodney/state.json
+                              # Chrome data in ./.rodney/chrome-data/
+rodney open https://example.com   # Auto-detects local session
+rodney stop                       # Cleans up local session
+```
+
+This is useful when you want isolated browser sessions per project — each directory gets its own Chrome instance, cookies, and state.
+
+**Auto-detection:** When neither `--local` nor `--global` is specified, Rodney checks for `./.rodney/state.json` in the current directory. If found, it uses the local session; otherwise it falls back to the global `~/.rodney/` session.
+
+```bash
+# Force global even when a local session exists
+rodney --global open https://example.com
+
+# Force local (errors if no local session)
+rodney --local status
+```
+
+The `--local` and `--global` flags can appear anywhere in the command:
+
+```bash
+rodney --local start
+rodney start --local          # Same effect
+rodney open --global https://example.com
+```
+
+Add `.rodney/` to your `.gitignore` to keep session state out of version control.
+
 ### Shell scripting examples
 
 ```bash
@@ -189,7 +222,7 @@ rodney stop
 | `ROD_TIMEOUT` | `30` | Default timeout in seconds for element queries |
 | `HTTPS_PROXY` / `HTTP_PROXY` | (none) | Authenticated proxy auto-detected on start |
 
-State is stored in `~/.rodney/state.json`. Chrome user data is stored in `~/.rodney/chrome-data/`.
+Global state is stored in `~/.rodney/state.json` with Chrome user data in `~/.rodney/chrome-data/`. When using `--local`, state is stored in `./.rodney/state.json` and `./.rodney/chrome-data/` in the current directory instead.
 
 ## Proxy support
 
@@ -261,3 +294,12 @@ The tool uses the [rod](https://github.com/go-rod/rod) Go library which communic
 | `ax-tree` | `[--depth N] [--json]` | Dump accessibility tree |
 | `ax-find` | `[--name N] [--role R] [--json]` | Find accessible nodes |
 | `ax-node` | `<selector> [--json]` | Show element accessibility info |
+
+### Global flags
+
+| Flag | Description |
+|---|---|
+| `--local` | Use directory-scoped session (`./.rodney/`) |
+| `--global` | Use global session (`~/.rodney/`) |
+| `--version` | Print version and exit |
+| `--help`, `-h` | Show help message |

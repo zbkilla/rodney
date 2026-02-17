@@ -59,5 +59,11 @@ Accessibility:
   rodney ax-node <selector> [--json]        Show accessibility info for element
 
 Options:
+  --local                         Use directory-scoped session (./.rodney/)
+  --global                        Use global session (~/.rodney/)
   --version                       Print version and exit
   --help, -h, help                Show this help message
+
+By default, commands auto-detect: if ./.rodney/state.json exists in the
+current directory, the local session is used; otherwise the global session.
+Use "rodney start --local" to create a directory-scoped session.
