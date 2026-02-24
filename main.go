@@ -275,6 +275,8 @@ func main() {
 		cmdAXFind(args)
 	case "ax-node":
 		cmdAXNode(args)
+	case "ua":
+		cmdUA(args)
 	case "help", "-h", "--help":
 		printUsage()
 		os.Exit(0)
@@ -1832,6 +1834,45 @@ func formatAXNodeDetailJSON(node *proto.AccessibilityAXNode) string {
 		return "{}"
 	}
 	return string(data)
+}
+
+// --- User agent override ---
+
+// setUserAgent overrides the browser's user agent string on the given page
+// using the CDP Emulation.setUserAgentOverride command. Passing an empty
+// string resets to the browser default.
+func setUserAgent(page *rod.Page, ua string) error {
+	return proto.EmulationSetUserAgentOverride{
+		UserAgent: ua,
+	}.Call(page)
+}
+
+// getUserAgent reads the current navigator.userAgent from the page.
+func getUserAgent(page *rod.Page) (string, error) {
+	result, err := page.Eval(`() => navigator.userAgent`)
+	if err != nil {
+		return "", err
+	}
+	return result.Value.Str(), nil
+}
+
+func cmdUA(args []string) {
+	_, _, page := withPage()
+
+	if len(args) == 0 {
+		// No argument: print current user agent
+		ua, err := getUserAgent(page)
+		if err != nil {
+			fatal("failed to read user agent: %v", err)
+		}
+		fmt.Println(ua)
+		return
+	}
+
+	ua := args[0]
+	if err := setUserAgent(page, ua); err != nil {
+		fatal("failed to set user agent: %v", err)
+	}
 }
 
 // --- Auth proxy for environments with authenticated HTTP proxies ---

@@ -56,6 +56,9 @@ Element checks:
   rodney visible <selector>       Check if element is visible (exit 1 if not)
   rodney assert <expr> [expected] [-m msg]  Assert JS expression (truthy or equality)
 
+Emulation:
+  rodney ua [string]            Print or override user agent (empty resets)
+
 Accessibility:
   rodney ax-tree [--depth N] [--json]       Dump accessibility tree
   rodney ax-find [--name N] [--role R] [--json]  Find accessible nodes

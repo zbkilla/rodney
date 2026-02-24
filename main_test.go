@@ -1148,3 +1148,108 @@ func TestInsecureFlag_WithSelfSignedCert(t *testing.T) {
 		}
 	})
 }
+
+// =====================
+// ua (user agent) tests
+// =====================
+
+func TestUA_OverridesUserAgent(t *testing.T) {
+	page := navigateTo(t, "/")
+
+	customUA := "Googlebot/2.1"
+	err := setUserAgent(page, customUA)
+	if err != nil {
+		t.Fatalf("setUserAgent failed: %v", err)
+	}
+
+	// Verify navigator.userAgent reflects the override
+	result, err := page.Eval(`() => navigator.userAgent`)
+	if err != nil {
+		t.Fatalf("failed to read navigator.userAgent: %v", err)
+	}
+	got := result.Value.Str()
+	if got != customUA {
+		t.Errorf("expected user agent %q, got %q", customUA, got)
+	}
+}
+
+func TestUA_EmptyStringResetsToDefault(t *testing.T) {
+	page := navigateTo(t, "/")
+
+	// Override to something custom
+	err := setUserAgent(page, "CustomBot/1.0")
+	if err != nil {
+		t.Fatalf("setUserAgent failed: %v", err)
+	}
+
+	// Verify override took effect
+	result, err := page.Eval(`() => navigator.userAgent`)
+	if err != nil {
+		t.Fatalf("failed to read navigator.userAgent: %v", err)
+	}
+	if result.Value.Str() != "CustomBot/1.0" {
+		t.Fatalf("override did not take effect")
+	}
+
+	// Reset by passing empty string
+	err = setUserAgent(page, "")
+	if err != nil {
+		t.Fatalf("setUserAgent (reset) failed: %v", err)
+	}
+
+	// Should no longer be the custom UA, should be a real browser UA
+	result, err = page.Eval(`() => navigator.userAgent`)
+	if err != nil {
+		t.Fatalf("failed to read navigator.userAgent after reset: %v", err)
+	}
+	got := result.Value.Str()
+	if got == "CustomBot/1.0" {
+		t.Error("expected user agent to reset, but it still shows CustomBot/1.0")
+	}
+	if !strings.Contains(got, "Chrome") {
+		t.Errorf("expected reset UA to contain 'Chrome' (browser default), got %q", got)
+	}
+}
+
+func TestUA_ReadsCurrentUserAgent(t *testing.T) {
+	page := navigateTo(t, "/")
+
+	// Read current UA without setting
+	ua, err := getUserAgent(page)
+	if err != nil {
+		t.Fatalf("getUserAgent failed: %v", err)
+	}
+	if ua == "" {
+		t.Error("expected non-empty default user agent")
+	}
+	if !strings.Contains(ua, "Chrome") {
+		t.Errorf("expected default UA to contain 'Chrome', got %q", ua)
+	}
+}
+
+func TestUA_OverridePersistsAcrossNavigation(t *testing.T) {
+	page := navigateTo(t, "/")
+
+	customUA := "TestBot/3.0"
+	err := setUserAgent(page, customUA)
+	if err != nil {
+		t.Fatalf("setUserAgent failed: %v", err)
+	}
+
+	// Navigate to a different page
+	err = page.Navigate(env.server.URL + "/form")
+	if err != nil {
+		t.Fatalf("navigation failed: %v", err)
+	}
+	page.MustWaitLoad()
+
+	// User agent should still be overridden
+	result, err := page.Eval(`() => navigator.userAgent`)
+	if err != nil {
+		t.Fatalf("failed to read navigator.userAgent: %v", err)
+	}
+	got := result.Value.Str()
+	if got != customUA {
+		t.Errorf("expected user agent %q after navigation, got %q", customUA, got)
+	}
+}
