@@ -1558,6 +1558,42 @@ func TestCookieClear(t *testing.T) {
 	}
 }
 
+func TestCookieClear_WithDomain(t *testing.T) {
+	page := navigateTo(t, "/")
+	clearCookies(t, page)
+
+	// Set cookies on two different domains
+	setCookieOnBrowser(page, &proto.NetworkCookieParam{
+		Name: "keep", Value: "yes", URL: env.server.URL + "/",
+	})
+	setCookieOnBrowser(page, &proto.NetworkCookieParam{
+		Name: "remove", Value: "bye", URL: "https://other.example.com/",
+	})
+
+	// Clear only other.example.com
+	clearCookiesForDomain(page, "other.example.com")
+
+	// Cookie on test server should still exist
+	cookies := getCookiesFromBrowser(page, []string{env.server.URL + "/"})
+	found := false
+	for _, c := range cookies {
+		if c.Name == "keep" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("cookie 'keep' on test server should still exist after clearing other domain")
+	}
+
+	// Cookie on other.example.com should be gone
+	cookies = getCookiesFromBrowser(page, []string{"https://other.example.com/"})
+	for _, c := range cookies {
+		if c.Name == "remove" {
+			t.Error("cookie 'remove' on other.example.com should have been cleared")
+		}
+	}
+}
+
 func TestParseCookieGetArgs(t *testing.T) {
 	name, urls, jsonOut := parseCookieGetArgs([]string{"mysess", "--domain", "example.com", "--json"})
 	if name != "mysess" {

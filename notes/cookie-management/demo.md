@@ -233,3 +233,35 @@ rodney cookie-get --json simple_cookie
   }
 ]
 ```
+
+## cookie-clear --domain: Scoped clearing
+
+You can also clear cookies for just one domain, leaving others untouched:
+
+```bash
+rodney cookie-clear && rodney cookie-set keep_me yes --domain .example.com && rodney cookie-set remove_me bye --domain .other.com && rodney cookie-get --domain example.com && rodney cookie-get --domain other.com
+```
+
+```output
+All cookies cleared
+name=keep_me	value=yes	domain=.example.com	path=/	session
+name=remove_me	value=bye	domain=.other.com	path=/	session
+```
+
+```bash
+rodney cookie-clear --domain other.com
+```
+
+```output
+Cookies cleared for other.com
+```
+
+The `.example.com` cookie survives, the `.other.com` one is gone:
+
+```bash
+rodney cookie-get --domain example.com && rodney cookie-get --domain other.com
+```
+
+```output
+name=keep_me	value=yes	domain=.example.com	path=/	session
+```

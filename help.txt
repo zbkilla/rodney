@@ -60,7 +60,7 @@ Cookies:
   rodney cookie-set <name> <val> [opts]  Set a cookie (defaults to current page)
   rodney cookie-get [name] [--json]      Get cookies (name for value, omit for all)
   rodney cookie-delete <name> [opts]     Delete cookies by name
-  rodney cookie-clear                    Clear all browser cookies
+  rodney cookie-clear [--domain <dom>]    Clear all cookies (or just one domain)
 
 Accessibility:
   rodney ax-tree [--depth N] [--json]       Dump accessibility tree

@@ -2142,13 +2142,45 @@ func cmdCookieDelete(args []string) {
 	deleteCookieFromBrowser(page, name, domain, cookieURL, path)
 }
 
-func cmdCookieClear(args []string) {
-	_, _, page := withPage()
-	err := proto.NetworkClearBrowserCookies{}.Call(page)
-	if err != nil {
-		fatal("failed to clear cookies: %v", err)
+func clearCookiesForDomain(page *rod.Page, domain string) {
+	cookies := getCookiesFromBrowser(page, []string{"https://" + domain + "/"})
+	for _, c := range cookies {
+		err := proto.NetworkDeleteCookies{
+			Name:   c.Name,
+			Domain: c.Domain,
+			Path:   c.Path,
+		}.Call(page)
+		if err != nil {
+			fatal("failed to delete cookie %s: %v", c.Name, err)
+		}
 	}
-	fmt.Println("All cookies cleared")
+}
+
+func cmdCookieClear(args []string) {
+	var domain string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--domain":
+			i++
+			if i >= len(args) {
+				fatal("--domain requires a value")
+			}
+			domain = args[i]
+		default:
+			fatal("unknown flag: %s\nusage: rodney cookie-clear [--domain <domain>]", args[i])
+		}
+	}
+	_, _, page := withPage()
+	if domain != "" {
+		clearCookiesForDomain(page, domain)
+		fmt.Printf("Cookies cleared for %s\n", domain)
+	} else {
+		err := proto.NetworkClearBrowserCookies{}.Call(page)
+		if err != nil {
+			fatal("failed to clear cookies: %v", err)
+		}
+		fmt.Println("All cookies cleared")
+	}
 }
 
 // cmdInternalProxy is a hidden subcommand: rodney _proxy <port> <upstream> <authHeader>
