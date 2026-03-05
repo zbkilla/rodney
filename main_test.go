@@ -1249,10 +1249,59 @@ func TestCookieSet_SecureHTTPOnly(t *testing.T) {
 	t.Errorf("secure_cookie not found")
 }
 
-func TestParseCookieSetArgs_DomainRequired(t *testing.T) {
-	_, err := parseCookieSetArgs([]string{"name", "value"})
-	if err == nil {
-		t.Error("expected error when neither --domain nor --url provided")
+func TestParseCookieSetArgs_NoDomainOrURL(t *testing.T) {
+	param, err := parseCookieSetArgs([]string{"name", "value"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// No domain or URL set — cmdCookieSet will default to current page URL
+	if param.Domain != "" {
+		t.Errorf("domain = %q, want empty", param.Domain)
+	}
+	if param.URL != "" {
+		t.Errorf("url = %q, want empty", param.URL)
+	}
+}
+
+func TestCookieSet_DefaultsToCurrentPage(t *testing.T) {
+	page := navigateTo(t, "/")
+	clearCookies(t, page)
+
+	// Simulate what cmdCookieSet does: parse args with no --domain/--url,
+	// then fill in the page URL
+	param, err := parseCookieSetArgs([]string{"page_cookie", "hello"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if param.Domain == "" && param.URL == "" {
+		info, infoErr := page.Info()
+		if infoErr != nil {
+			t.Fatalf("failed to get page info: %v", infoErr)
+		}
+		param.URL = info.URL
+	}
+
+	err = proto.NetworkSetCookies{
+		Cookies: []*proto.NetworkCookieParam{param},
+	}.Call(page)
+	if err != nil {
+		t.Fatalf("setCookies failed: %v", err)
+	}
+
+	// Read it back
+	result, infoErr := proto.NetworkGetCookies{Urls: []string{env.server.URL + "/"}}.Call(page)
+	if infoErr != nil {
+		t.Fatalf("getCookies failed: %v", infoErr)
+	}
+	found := false
+	for _, c := range result.Cookies {
+		if c.Name == "page_cookie" && c.Value == "hello" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("cookie page_cookie=hello not found — default to current page URL didn't work")
 	}
 }
 

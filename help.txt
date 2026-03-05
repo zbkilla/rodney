@@ -57,7 +57,7 @@ Element checks:
   rodney assert <expr> [expected] [-m msg]  Assert JS expression (truthy or equality)
 
 Cookies:
-  rodney cookie-set <name> <val> [opts]  Set a cookie (--domain or --url required)
+  rodney cookie-set <name> <val> [opts]  Set a cookie (defaults to current page)
   rodney cookie-get [name] [--json]      Get cookies (name for value, omit for all)
   rodney cookie-delete <name> [opts]     Delete cookies by name
   rodney cookie-clear                    Clear all browser cookies

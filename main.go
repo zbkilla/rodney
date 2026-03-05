@@ -1936,9 +1936,6 @@ func parseCookieSetArgs(args []string) (*proto.NetworkCookieParam, error) {
 			return nil, fmt.Errorf("unknown flag: %s", args[i])
 		}
 	}
-	if param.Domain == "" && param.URL == "" {
-		return nil, fmt.Errorf("--domain or --url is required")
-	}
 	return param, nil
 }
 
@@ -1957,6 +1954,14 @@ func cmdCookieSet(args []string) {
 		fatal("%v", err)
 	}
 	_, _, page := withPage()
+	// Default to current page URL (like document.cookie= in JS)
+	if param.Domain == "" && param.URL == "" {
+		info, err := page.Info()
+		if err != nil {
+			fatal("failed to get page info: %v", err)
+		}
+		param.URL = info.URL
+	}
 	setCookieOnBrowser(page, param)
 }
 

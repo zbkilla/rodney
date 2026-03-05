@@ -189,26 +189,47 @@ rodney cookie-get --domain example.com
 
 No cookies remain — `cookie-clear` wipes everything across all domains.
 
-## Error handling
+## Defaulting to the current page
 
-Trying to set a cookie without `--domain` or `--url` gives an error:
+If you omit `--domain` and `--url`, `cookie-set` defaults to the current page's URL — just like `document.cookie=` in JavaScript:
 
 ```bash
-rodney cookie-set name value 2>&1; echo "exit code: $?"
+rodney cookie-set simple_cookie works
 ```
 
 ```output
-error: --domain or --url is required
-exit code: 2
 ```
 
-Same for `cookie-delete` without a name:
-
 ```bash
-rodney cookie-delete 2>&1; echo "exit code: $?"
+rodney cookie-get simple_cookie
 ```
 
 ```output
-error: usage: rodney cookie-delete <name> [--domain <domain>] [--url <url>] [--path <path>]
-exit code: 2
+works
+```
+
+The cookie was set on `www.example.com` (the current page's host) automatically. Let's verify with `--json`:
+
+```bash
+rodney cookie-get --json simple_cookie
+```
+
+```output
+[
+  {
+    "name": "simple_cookie",
+    "value": "works",
+    "domain": "www.example.com",
+    "path": "/",
+    "expires": -1,
+    "size": 18,
+    "httpOnly": false,
+    "secure": true,
+    "session": true,
+    "priority": "Medium",
+    "sameParty": false,
+    "sourceScheme": "Secure",
+    "sourcePort": 443
+  }
+]
 ```
