@@ -228,3 +228,242 @@ tests/test_browser.py::TestErrors::test_error_raises_rodney_error PASSED [100%]
 
 ======================== 32 passed in 101.50s (0:01:41) ========================
 ```
+
+## Source Code for Demo Scripts
+
+```bash
+cat /tmp/demo_basic.py
+```
+
+```output
+import rodney
+
+with rodney.Browser() as browser:
+    title = browser.open("https://www.example.com")
+    print(f"Title: {title}")
+    print(f"URL:   {browser.url()}")
+    print(f"Text:  {browser.text('h1')}")
+```
+
+```bash
+cat /tmp/demo_js.py
+```
+
+```output
+import rodney
+
+with rodney.Browser() as browser:
+    browser.open("https://www.example.com")
+
+    print("Number:", browser.js("1 + 2"))
+    print("String:", browser.js("document.title"))
+    print("Boolean:", browser.js("document.title === 'Example Domain'"))
+    print("Array:", browser.js("[1, 2, 3]"))
+    print("Null:", browser.js("null"))
+```
+
+```bash
+cat /tmp/demo_checks.py
+```
+
+```output
+import rodney
+
+with rodney.Browser() as browser:
+    browser.open("https://www.example.com")
+
+    print("h1 exists:", browser.exists("h1"))
+    print("#nope exists:", browser.exists("#nope"))
+    print("p count:", browser.count("p"))
+    print("h1 visible:", browser.visible("h1"))
+```
+
+```bash
+cat /tmp/demo_form.py
+```
+
+```output
+import http.server, threading, rodney
+
+# Spin up a tiny test server with a form
+html = b"""<!DOCTYPE html><html><head><title>Form Demo</title></head><body>
+<form id="f"><input id="name" type="text"><select id="color">
+<option value="red">Red</option><option value="blue">Blue</option>
+</select><button id="go" type="submit">Go</button></form></body></html>"""
+
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.end_headers()
+        self.wfile.write(html)
+    def log_message(self, *a): pass
+
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+url = f"http://127.0.0.1:{srv.server_address[1]}"
+
+with rodney.Browser() as browser:
+    browser.open(url)
+    print("Page:", browser.title())
+
+    browser.input("#name", "Alice")
+    val = browser.js('document.querySelector("#name").value')
+    print("Name field:", val)
+
+    browser.select("#color", "blue")
+    val = browser.js('document.querySelector("#color").value')
+    print("Color field:", val)
+
+    browser.clear("#name")
+    val = browser.js('document.querySelector("#name").value')
+    print("After clear:", repr(val))
+
+srv.shutdown()
+```
+
+```bash
+cat /tmp/demo_errors.py
+```
+
+```output
+import rodney
+
+with rodney.Browser() as browser:
+    browser.open("https://www.example.com")
+
+    # exists() returns False instead of raising
+    print("Missing element exists:", browser.exists("#nope"))
+
+    # But click on a missing element raises RodneyError
+    try:
+        browser.click("#nope")
+    except rodney.RodneyError as e:
+        print(f"RodneyError: {e}")
+```
+
+```bash
+cat /tmp/demo_html.py
+```
+
+```output
+import rodney
+
+with rodney.Browser() as browser:
+    browser.open("https://www.example.com")
+    html = browser.html("h1")
+    print("Element HTML:", html.strip())
+    print("Title attr:", browser.attr("a", "href"))
+```
+
+```bash
+cat /tmp/demo_async_basic.py
+```
+
+```output
+import asyncio
+import rodney
+
+async def main():
+    async with rodney.AsyncBrowser() as browser:
+        title = await browser.open("https://www.example.com")
+        print(f"Title: {title}")
+        print(f"URL:   {await browser.url()}")
+        print(f"h1:    {await browser.text('h1')}")
+        print(f"JS:    {await browser.js('2 ** 10')}")
+
+asyncio.run(main())
+```
+
+```bash
+cat /tmp/demo_concurrent.py
+```
+
+```output
+import asyncio, time, rodney
+
+async def fetch_title(url):
+    async with rodney.AsyncBrowser() as browser:
+        await browser.open(url)
+        return await browser.title()
+
+async def main():
+    urls = [
+        "https://www.example.com",
+        "https://www.example.org",
+        "https://www.example.net",
+    ]
+    start = time.monotonic()
+    titles = await asyncio.gather(*(fetch_title(u) for u in urls))
+    elapsed = time.monotonic() - start
+    for url, title in zip(urls, titles):
+        print(f"{url} -> {title}")
+    print(f"\n3 browsers concurrently in {elapsed:.1f}s")
+
+asyncio.run(main())
+```
+
+```bash
+cat /tmp/demo_factory.py
+```
+
+```output
+import asyncio
+import rodney
+
+async def main():
+    browser = await rodney.AsyncBrowser.start()
+    try:
+        await browser.open("https://www.example.com")
+        print("Title:", await browser.title())
+        print("Running:", browser._started)
+    finally:
+        await browser.stop()
+    print("After stop:", browser._started)
+
+asyncio.run(main())
+```
+
+```bash
+cat /tmp/demo_crash.py
+```
+
+```output
+import subprocess, os, signal, time
+
+# Start a Python script that opens a browser but gets killed
+child = subprocess.Popen(
+    ["python3", "-c", """
+import rodney, os, time, sys
+browser = rodney.Browser()
+browser.open("https://www.example.com")
+print(f"rodney_pid={browser._proc.pid}", flush=True)
+time.sleep(60)  # hang around — will be killed
+"""],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    cwd="/home/user/rodney/python",
+    env={**os.environ, "VIRTUAL_ENV": "/home/user/rodney/python/.venv",
+         "PATH": "/home/user/rodney/python/.venv/bin:" + os.environ["PATH"]},
+)
+
+# Read the rodney PID
+line = child.stdout.readline().decode().strip()
+rodney_pid = int(line.split("=")[1])
+print(f"Child Python PID: {child.pid}")
+print(f"Rodney serve PID: {rodney_pid}")
+
+# Kill the Python process hard (SIGKILL — no cleanup handlers run)
+os.kill(child.pid, signal.SIGKILL)
+child.wait()
+print("Python killed with SIGKILL")
+
+# Give rodney a moment to notice stdin EOF and clean up
+time.sleep(2)
+
+# Check if rodney is still alive
+try:
+    os.kill(rodney_pid, 0)
+    print(f"Rodney PID {rodney_pid}: STILL RUNNING (bad)")
+except ProcessLookupError:
+    print(f"Rodney PID {rodney_pid}: cleaned up (good)")
+```
