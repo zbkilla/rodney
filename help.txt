@@ -61,6 +61,9 @@ Accessibility:
   rodney ax-find [--name N] [--role R] [--json]  Find accessible nodes
   rodney ax-node <selector> [--json]        Show accessibility info for element
 
+Integration:
+  rodney serve [--show] [--insecure | -k]  Run as JSON-over-stdio subprocess
+
 Options:
   --local                         Use directory-scoped session (./.rodney/)
   --global                        Use global session (~/.rodney/)
@@ -73,6 +76,18 @@ Use "rodney start --local" to create a directory-scoped session.
 
 Environment:
   RODNEY_HOME                     Override data directory (default: ~/.rodney)
+  ROD_CHROME_BIN                  Path to Chrome/Chromium binary
+  ROD_TIMEOUT                     Element query timeout in seconds (default: 30)
+
+The "serve" command runs rodney as a long-lived subprocess, reading
+newline-delimited JSON requests from stdin and writing JSON responses
+to stdout. Chrome is launched automatically and cleaned up when stdin
+closes (e.g. if the parent process exits). Protocol:
+
+  Request:  {"id": 1, "cmd": "open", "args": ["https://example.com"]}
+  Response: {"id": 1, "ok": true, "stdout": "Example Domain"}
+
+All CLI commands are available. Send {"cmd": "stop"} to shut down.
 
 Exit codes:
   0  Success
