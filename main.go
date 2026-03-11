@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -270,6 +271,8 @@ func main() {
 		cmdAXFind(args)
 	case "ax-node":
 		cmdAXNode(args)
+	case "serve":
+		cmdServe(args)
 	case "help", "-h", "--help":
 		printUsage()
 		os.Exit(0)
@@ -319,8 +322,13 @@ func init() {
 // launchChrome starts Chrome with the given options and saves state.
 // If detach is true, Chrome survives after rodney exits (CLI mode).
 // If detach is false, Chrome dies when rodney dies (serve mode).
+// Messages are written to msgOut (pass io.Discard to suppress).
 // Returns the State and connected rod.Browser.
-func launchChrome(headless bool, ignoreCertErrors bool, detach bool) (*State, *rod.Browser) {
+func launchChrome(headless bool, ignoreCertErrors bool, detach bool, msgOut ...io.Writer) (*State, *rod.Browser) {
+	var w io.Writer = os.Stdout
+	if len(msgOut) > 0 {
+		w = msgOut[0]
+	}
 	dataDir := filepath.Join(stateDir(), "chrome-data")
 	os.MkdirAll(dataDir, 0755)
 
@@ -372,7 +380,7 @@ func launchChrome(headless bool, ignoreCertErrors bool, detach bool) (*State, *r
 
 		l.Set("proxy-server", fmt.Sprintf("http://127.0.0.1:%d", proxyPort))
 		ignoreCertErrors = true // Proxy requires ignoring cert errors
-		fmt.Printf("Auth proxy started (PID %d, port %d) -> %s\n", proxyPID, proxyPort, server)
+		fmt.Fprintf(w, "Auth proxy started (PID %d, port %d) -> %s\n", proxyPID, proxyPort, server)
 	}
 
 	if ignoreCertErrors {
@@ -400,8 +408,8 @@ func launchChrome(headless bool, ignoreCertErrors bool, detach bool) (*State, *r
 		fatal("failed to save state: %v", err)
 	}
 
-	fmt.Printf("Chrome started (PID %d)\n", pid)
-	fmt.Printf("Debug URL: %s\n", debugURL)
+	fmt.Fprintf(w, "Chrome started (PID %d)\n", pid)
+	fmt.Fprintf(w, "Debug URL: %s\n", debugURL)
 
 	browser, err := connectBrowser(state)
 	if err != nil {
