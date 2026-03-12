@@ -318,15 +318,27 @@ func withPage() (*State, *rod.Browser, *rod.Page) {
 
 // --- Commands ---
 
-func cmdStart(args []string) {
-	ignoreCertErrors := false
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
+// parseStartArgs parses the flags for the "start" command.
+// Returns ignoreCertErrors, headless, and an error for unknown flags.
+func parseStartArgs(args []string) (ignoreCertErrors bool, headless bool, err error) {
+	headless = true
+	for _, arg := range args {
+		switch arg {
 		case "--insecure", "-k":
 			ignoreCertErrors = true
+		case "--show":
+			headless = false
 		default:
-			fatal("unknown flag: %s\nusage: rodney start [--insecure]", args[i])
+			return false, true, fmt.Errorf("unknown flag: %s\nusage: rodney start [--show] [--insecure]", arg)
 		}
+	}
+	return ignoreCertErrors, headless, nil
+}
+
+func cmdStart(args []string) {
+	ignoreCertErrors, headless, err := parseStartArgs(args)
+	if err != nil {
+		fatal("%s", err)
 	}
 
 	// Check if already running
@@ -336,14 +348,6 @@ func cmdStart(args []string) {
 			b.MustClose()
 			// It was actually running, warn
 			removeState()
-		}
-	}
-
-	// Parse flags
-	headless := true
-	for _, arg := range args {
-		if arg == "--show" {
-			headless = false
 		}
 	}
 
