@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"encoding/base64"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -160,6 +161,23 @@ func printUsage() {
 func fatal(format string, args ...interface{}) {
 	fmt.Fprintf(os.Stderr, "error: "+format+"\n", args...)
 	os.Exit(2)
+}
+
+// findUnknownFlag returns the first arg not registered in fs, preserving original form (e.g. --bogus).
+func findUnknownFlag(args []string, fs *flag.FlagSet) string {
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		if fs.Lookup(name) == nil {
+			return a
+		}
+	}
+	if len(args) > 0 {
+		return args[0]
+	}
+	return ""
 }
 
 func main() {
@@ -321,17 +339,19 @@ func withPage() (*State, *rod.Browser, *rod.Page) {
 // parseStartArgs parses the flags for the "start" command.
 // Returns ignoreCertErrors, headless, and an error for unknown flags.
 func parseStartArgs(args []string) (ignoreCertErrors bool, headless bool, err error) {
-	headless = true
-	for _, arg := range args {
-		switch arg {
-		case "--insecure", "-k":
-			ignoreCertErrors = true
-		case "--show":
-			headless = false
-		default:
-			return false, true, fmt.Errorf("unknown flag: %s\nusage: rodney start [--show] [--insecure]", arg)
-		}
+	fs := flag.NewFlagSet("start", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.BoolVar(&ignoreCertErrors, "insecure", false, "")
+	fs.BoolVar(&ignoreCertErrors, "k", false, "")
+	show := fs.Bool("show", false, "")
+
+	if parseErr := fs.Parse(args); parseErr != nil {
+		return false, true, fmt.Errorf("unknown flag: %s\nusage: rodney start [--show] [--insecure]", findUnknownFlag(args, fs))
 	}
+	if fs.NArg() > 0 {
+		return false, true, fmt.Errorf("unknown flag: %s\nusage: rodney start [--show] [--insecure]", fs.Arg(0))
+	}
+	headless = !*show
 	return ignoreCertErrors, headless, nil
 }
 
@@ -593,14 +613,12 @@ func cmdForward(args []string) {
 }
 
 func cmdReload(args []string) {
-	hard := false
-	for _, a := range args {
-		if a == "--hard" {
-			hard = true
-		}
-	}
+	fs := flag.NewFlagSet("reload", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	hard := fs.Bool("hard", false, "")
+	fs.Parse(args)
 	_, _, page := withPage()
-	if hard {
+	if *hard {
 		// CDP Page.reload with ignoreCache (equivalent to Shift+Refresh)
 		err := (proto.PageReload{IgnoreCache: true}).Call(page)
 		if err != nil {
@@ -1106,43 +1124,27 @@ func nextAvailableFile(base, ext string) string {
 }
 
 func cmdScreenshot(args []string) {
-	var file string
-	width := 1280
-	height := 0
-	fullPage := true
+	fs := flag.NewFlagSet("screenshot", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	width := fs.Int("width", 1280, "")
+	fs.IntVar(width, "w", 1280, "")
+	height := fs.Int("height", 0, "")
+	fs.IntVar(height, "h", 0, "")
 
-	// Parse flags and positional args
-	var positional []string
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "-w", "--width":
-			i++
-			if i >= len(args) {
-				fatal("missing value for %s", args[i-1])
-			}
-			v, err := strconv.Atoi(args[i])
-			if err != nil {
-				fatal("invalid width: %v", err)
-			}
-			width = v
-		case "-h", "--height":
-			i++
-			if i >= len(args) {
-				fatal("missing value for %s", args[i-1])
-			}
-			v, err := strconv.Atoi(args[i])
-			if err != nil {
-				fatal("invalid height: %v", err)
-			}
-			height = v
-			fullPage = false
-		default:
-			positional = append(positional, args[i])
-		}
+	if err := fs.Parse(args); err != nil {
+		fatal("%v", err)
 	}
 
-	if len(positional) > 0 {
-		file = positional[0]
+	fullPage := true
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "height" || f.Name == "h" {
+			fullPage = false
+		}
+	})
+
+	var file string
+	if fs.NArg() > 0 {
+		file = fs.Arg(0)
 	} else {
 		file = nextAvailableFile("screenshot", ".png")
 	}
@@ -1150,12 +1152,12 @@ func cmdScreenshot(args []string) {
 	_, _, page := withPage()
 
 	// Set viewport size
-	viewportHeight := height
+	viewportHeight := *height
 	if viewportHeight == 0 {
 		viewportHeight = 720
 	}
 	err := proto.EmulationSetDeviceMetricsOverride{
-		Width:             width,
+		Width:             *width,
 		Height:            viewportHeight,
 		DeviceScaleFactor: 1,
 	}.Call(page)
@@ -1500,27 +1502,24 @@ func init() {
 // --- Accessibility commands ---
 
 func cmdAXTree(args []string) {
-	var depth *int
-	jsonOutput := false
+	fs := flag.NewFlagSet("ax-tree", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	depthVal := fs.Int("depth", 0, "")
+	jsonOutput := fs.Bool("json", false, "")
 
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--depth":
-			i++
-			if i >= len(args) {
-				fatal("missing value for --depth")
-			}
-			v, err := strconv.Atoi(args[i])
-			if err != nil {
-				fatal("invalid depth: %v", err)
-			}
-			depth = &v
-		case "--json":
-			jsonOutput = true
-		default:
-			fatal("unknown flag: %s\nusage: rodney ax-tree [--depth N] [--json]", args[i])
-		}
+	if err := fs.Parse(args); err != nil {
+		fatal("unknown flag: %s\nusage: rodney ax-tree [--depth N] [--json]", findUnknownFlag(args, fs))
 	}
+	if fs.NArg() > 0 {
+		fatal("unknown flag: %s\nusage: rodney ax-tree [--depth N] [--json]", fs.Arg(0))
+	}
+
+	var depth *int
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "depth" {
+			depth = depthVal
+		}
+	})
 
 	_, _, page := withPage()
 	result, err := proto.AccessibilityGetFullAXTree{Depth: depth}.Call(page)
@@ -1528,7 +1527,7 @@ func cmdAXTree(args []string) {
 		fatal("failed to get accessibility tree: %v", err)
 	}
 
-	if jsonOutput {
+	if *jsonOutput {
 		fmt.Println(formatAXTreeJSON(result.Nodes))
 	} else {
 		fmt.Print(formatAXTree(result.Nodes))
@@ -1536,32 +1535,21 @@ func cmdAXTree(args []string) {
 }
 
 func cmdAXFind(args []string) {
-	var name, role string
-	jsonOutput := false
+	fs := flag.NewFlagSet("ax-find", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	name := fs.String("name", "", "")
+	role := fs.String("role", "", "")
+	jsonOutput := fs.Bool("json", false, "")
 
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--name":
-			i++
-			if i >= len(args) {
-				fatal("missing value for --name")
-			}
-			name = args[i]
-		case "--role":
-			i++
-			if i >= len(args) {
-				fatal("missing value for --role")
-			}
-			role = args[i]
-		case "--json":
-			jsonOutput = true
-		default:
-			fatal("unknown flag: %s\nusage: rodney ax-find [--name N] [--role R] [--json]", args[i])
-		}
+	if err := fs.Parse(args); err != nil {
+		fatal("unknown flag: %s\nusage: rodney ax-find [--name N] [--role R] [--json]", findUnknownFlag(args, fs))
+	}
+	if fs.NArg() > 0 {
+		fatal("unknown flag: %s\nusage: rodney ax-find [--name N] [--role R] [--json]", fs.Arg(0))
 	}
 
 	_, _, page := withPage()
-	nodes, err := queryAXNodes(page, name, role)
+	nodes, err := queryAXNodes(page, *name, *role)
 	if err != nil {
 		fatal("query failed: %v", err)
 	}
@@ -1571,7 +1559,7 @@ func cmdAXFind(args []string) {
 		os.Exit(1)
 	}
 
-	if jsonOutput {
+	if *jsonOutput {
 		data, _ := json.MarshalIndent(nodes, "", "  ")
 		fmt.Println(string(data))
 	} else {
@@ -1580,22 +1568,25 @@ func cmdAXFind(args []string) {
 }
 
 func cmdAXNode(args []string) {
+	// Pre-extract --json since it may appear after the positional selector
 	jsonOutput := false
-	var positional []string
-
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--json":
+	var filtered []string
+	for _, a := range args {
+		if a == "--json" {
 			jsonOutput = true
-		default:
-			positional = append(positional, args[i])
+		} else {
+			filtered = append(filtered, a)
 		}
 	}
 
-	if len(positional) < 1 {
+	fs := flag.NewFlagSet("ax-node", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.Parse(filtered)
+
+	if fs.NArg() < 1 {
 		fatal("usage: rodney ax-node <selector> [--json]")
 	}
-	selector := positional[0]
+	selector := fs.Arg(0)
 
 	_, _, page := withPage()
 	node, err := getAXNode(page, selector)
