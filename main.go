@@ -550,6 +550,42 @@ func cmdStatus(args []string) {
 	}
 }
 
+// isTransientCDPError reports whether v (an error value or panic value)
+// represents a transient Chrome DevTools Protocol condition that should not
+// abort the current command. These are cases where the page generally made it
+// to a usable state despite a protocol-level signal of failure — heavy
+// Material Design Components pages exceeding the CDP object-reference depth
+// limit, or navigations that resolve with a 4xx/5xx response code that Chrome
+// surfaces as ERR_HTTP_RESPONSE_CODE_FAILURE.
+func isTransientCDPError(v interface{}) bool {
+	if v == nil {
+		return false
+	}
+	msg := fmt.Sprintf("%v", v)
+	return strings.Contains(msg, "Object reference chain is too long") ||
+		strings.Contains(msg, "ERR_HTTP_RESPONSE_CODE_FAILURE") ||
+		strings.Contains(msg, "ERR_ABORTED") ||
+		strings.Contains(msg, "-32000")
+}
+
+// callWithTransientRecovery runs fn; if fn panics with a transient CDP error,
+// the panic is swallowed and a warning is logged to stderr. Other panics
+// propagate. Returns true if fn completed without a recovered panic.
+func callWithTransientRecovery(stage string, fn func()) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			if isTransientCDPError(r) {
+				fmt.Fprintf(os.Stderr, "warning: transient CDP condition during %s: %v\n", stage, r)
+				ok = false
+				return
+			}
+			panic(r)
+		}
+	}()
+	fn()
+	return true
+}
+
 func cmdOpen(args []string) {
 	if len(args) < 1 {
 		fatal("usage: rodney open <url>")
@@ -573,7 +609,20 @@ func cmdOpen(args []string) {
 	pages, _ := browser.Pages()
 	var page *rod.Page
 	if len(pages) == 0 {
-		page = browser.MustPage(url)
+		callWithTransientRecovery("page creation", func() {
+			page = browser.MustPage(url)
+		})
+		if page == nil {
+			// Recovery path: the MustPage panic may have still created a
+			// tab; grab the most recent one.
+			pages, _ := browser.Pages()
+			if len(pages) > 0 {
+				page = pages[len(pages)-1]
+			}
+		}
+		if page == nil {
+			fatal("failed to open page")
+		}
 		s.ActivePage = 0
 		saveState(s)
 	} else {
@@ -582,10 +631,15 @@ func cmdOpen(args []string) {
 			fatal("%v", err)
 		}
 		if err := page.Navigate(url); err != nil {
-			fatal("navigation failed: %v", err)
+			if !isTransientCDPError(err) {
+				fatal("navigation failed: %v", err)
+			}
+			fmt.Fprintf(os.Stderr, "warning: transient CDP condition during navigation: %v\n", err)
 		}
 	}
-	page.MustWaitLoad()
+	callWithTransientRecovery("waitload", func() {
+		page.MustWaitLoad()
+	})
 	info, _ := page.Info()
 	if info != nil {
 		fmt.Println(info.Title)
@@ -743,8 +797,14 @@ func cmdJS(args []string) {
 	expr := strings.Join(args, " ")
 	_, _, page := withPage()
 
-	// Wrap bare expressions in a function
-	js := fmt.Sprintf(`() => { return (%s); }`, expr)
+	// Wrap the user's code in eval() so statements (const/let/var, if/for, etc.)
+	// work alongside expressions. eval returns the value of the last expression.
+	// JSON-encoding the expression gives a safe JS string literal.
+	exprJSON, jerr := json.Marshal(expr)
+	if jerr != nil {
+		fatal("could not encode expression: %v", jerr)
+	}
+	js := fmt.Sprintf(`() => eval(%s)`, string(exprJSON))
 	result, err := page.Eval(js)
 	if err != nil {
 		fatal("JS error: %v", err)
@@ -1087,8 +1147,14 @@ func cmdWaitLoad(args []string) {
 
 func cmdWaitStable(args []string) {
 	_, _, page := withPage()
-	page.MustWaitStable()
-	fmt.Println("DOM stable")
+	stable := callWithTransientRecovery("waitstable", func() {
+		page.MustWaitStable()
+	})
+	if stable {
+		fmt.Println("DOM stable")
+	} else {
+		fmt.Println("DOM stable (transient CDP condition — treated as stable)")
+	}
 }
 
 func cmdWaitIdle(args []string) {
