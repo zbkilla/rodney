@@ -9,18 +9,19 @@ package main
 //   current.session          # plain text, name of the active session dir
 //   <session-id>/
 //     pid                    # daemon's PID
-//     meta.json              # {session_id, started, debug_url, body_types, max_body_bytes}
+//     meta.json              # session config (debug URL, body filter, max bytes)
+//     daemon.log             # stdout/stderr of the daemon
 //     requests.jsonl         # one event per line
-//     bodies/<reqid>.bin     # captured response body (binary or text)
+//     bodies/<reqid>         # captured response body
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -46,12 +47,27 @@ const (
 	sessionJSONLFile      = "requests.jsonl"
 	sessionBodiesDir      = "bodies"
 
-	defaultMaxBodyBytes int64 = 10 * 1024 * 1024 // 10 MB per body
+	defaultMaxBodyBytes int64 = 10 * 1024 * 1024 // 10 MiB per body
 	stopWaitTimeout           = 5 * time.Second
+	bodyFetchConcurrency      = 8 // parallel body fetches; bounded so we don't outrun Chrome's in-memory response cache
 )
 
-// resource types that we eagerly capture response bodies for by default
+// Default resource types whose response bodies we eagerly capture.
 var defaultBodyTypes = []string{"XHR", "Fetch", "WebSocket", "EventSource"}
+
+// netEventType discriminates JSONL records. Used in both emit sites and the
+// summariser switch.
+type netEventType string
+
+const (
+	evtRequest  netEventType = "request"
+	evtResponse netEventType = "response"
+	evtLoaded   netEventType = "loaded"
+	evtFailed   netEventType = "failed"
+)
+
+// bodyTypeNone is the sentinel passed to --body-types to disable body capture.
+const bodyTypeNone = "none"
 
 type netSessionMeta struct {
 	SessionID    string    `json:"session_id"`
@@ -61,44 +77,42 @@ type netSessionMeta struct {
 	MaxBodyBytes int64     `json:"max_body_bytes"`
 }
 
-// One JSONL line per event. Fields are omitempty so each event type only
-// carries what's relevant.
+// One JSONL line per event. JSON tags stay short for compact on-disk lines;
+// Go field names are full for readability.
 type netEvent struct {
-	Event     string                 `json:"event"` // request | response | loaded | failed
-	TS        time.Time              `json:"ts"`
-	ReqID     string                 `json:"reqid"`
-	SID       string                 `json:"sid,omitempty"`
-	URL       string                 `json:"url,omitempty"`
-	Method    string                 `json:"method,omitempty"`
-	Type      string                 `json:"type,omitempty"`
-	Initiator string                 `json:"initiator,omitempty"`
-	ReqHdr    map[string]interface{} `json:"req_headers,omitempty"`
-	PostData  string                 `json:"post_data,omitempty"`
-	Status    int                    `json:"status,omitempty"`
-	StatusTxt string                 `json:"status_text,omitempty"`
-	MIME      string                 `json:"mime,omitempty"`
-	ResHdr    map[string]interface{} `json:"res_headers,omitempty"`
-	RemoteIP  string                 `json:"remote_ip,omitempty"`
-	RemotePrt int                    `json:"remote_port,omitempty"`
-	EncodedLn int64                  `json:"encoded_len,omitempty"`
-	BodyPath  string                 `json:"body_path,omitempty"`
-	BodySize  int64                  `json:"body_size,omitempty"`
-	BodyTrunc bool                   `json:"body_truncated,omitempty"`
-	Error     string                 `json:"error,omitempty"`
-	Canceled  bool                   `json:"canceled,omitempty"`
+	Event           netEventType         `json:"event"`
+	TS              time.Time            `json:"ts"`
+	ReqID           string               `json:"reqid"`
+	SID             string               `json:"sid,omitempty"`
+	URL             string               `json:"url,omitempty"`
+	Method          string               `json:"method,omitempty"`
+	Type            string               `json:"type,omitempty"`
+	Initiator       string               `json:"initiator,omitempty"`
+	RequestHeaders  proto.NetworkHeaders `json:"req_headers,omitempty"`
+	PostData        string               `json:"post_data,omitempty"`
+	Status          int                  `json:"status,omitempty"`
+	StatusText      string               `json:"status_text,omitempty"`
+	MIME            string               `json:"mime,omitempty"`
+	ResponseHeaders proto.NetworkHeaders `json:"res_headers,omitempty"`
+	RemoteIP        string               `json:"remote_ip,omitempty"`
+	RemotePort      int                  `json:"remote_port,omitempty"`
+	EncodedLength   int64                `json:"encoded_len,omitempty"`
+	BodyPath        string               `json:"body_path,omitempty"`
+	BodySize        int64                `json:"body_size,omitempty"`
+	BodyTruncated   bool                 `json:"body_truncated,omitempty"`
+	Error           string               `json:"error,omitempty"`
+	Canceled        bool                 `json:"canceled,omitempty"`
 }
 
 // ---------- path helpers ----------
 
-func netDir() string                  { return filepath.Join(stateDir(), netDirName) }
-func currentSessionPath() string      { return filepath.Join(netDir(), currentSessionPointer) }
-func sessionPath(name string) string  { return filepath.Join(netDir(), name) }
-func sessionMetaPath(p string) string { return filepath.Join(p, sessionMetaFile) }
-func sessionPIDPath(p string) string  { return filepath.Join(p, sessionPIDFile) }
-func sessionJSONLPath(p string) string {
-	return filepath.Join(p, sessionJSONLFile)
-}
-func sessionBodyDir(p string) string { return filepath.Join(p, sessionBodiesDir) }
+func netDir() string                    { return filepath.Join(stateDir(), netDirName) }
+func currentSessionPath() string        { return filepath.Join(netDir(), currentSessionPointer) }
+func sessionPath(name string) string    { return filepath.Join(netDir(), name) }
+func sessionMetaPath(p string) string   { return filepath.Join(p, sessionMetaFile) }
+func sessionPIDPath(p string) string    { return filepath.Join(p, sessionPIDFile) }
+func sessionJSONLPath(p string) string  { return filepath.Join(p, sessionJSONLFile) }
+func sessionBodyDir(p string) string    { return filepath.Join(p, sessionBodiesDir) }
 
 func readCurrentSession() (string, string, error) {
 	data, err := os.ReadFile(currentSessionPath())
@@ -175,7 +189,6 @@ func cmdNetworkRecordStart(args []string) {
 		fatal("%s", err)
 	}
 
-	// Refuse to start if one is already recording.
 	if name, _, err := readCurrentSession(); err == nil {
 		fatal("a recording is already active (session %s). Run 'rodney network record stop' first.", name)
 	}
@@ -198,19 +211,21 @@ func cmdNetworkRecordStart(args []string) {
 		BodyTypes:    types,
 		MaxBodyBytes: *maxBodyBytes,
 	}
-	if buf, err := json.MarshalIndent(meta, "", "  "); err == nil {
-		_ = os.WriteFile(sessionMetaPath(sdir), buf, 0644)
+	buf, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		fatal("failed to marshal session meta: %v", err)
+	}
+	if err := os.WriteFile(sessionMetaPath(sdir), buf, 0644); err != nil {
+		fatal("failed to write session meta: %v", err)
 	}
 
 	exe, err := os.Executable()
 	if err != nil {
 		fatal("failed to resolve executable path: %v", err)
 	}
-	childArgs := []string{"_netrec", sdir, state.DebugURL, strings.Join(types, ","), strconv.FormatInt(*maxBodyBytes, 10)}
-	cmd := exec.Command(exe, childArgs...)
+	cmd := exec.Command(exe, "_netrec", sdir)
 	setSysProcAttr(cmd)
-	// Detach stdout/stderr so the child can fire and forget. Errors land in a
-	// log file inside the session dir for post-mortem.
+	// Errors land in a log file inside the session dir for post-mortem.
 	logf, _ := os.Create(filepath.Join(sdir, "daemon.log"))
 	cmd.Stdout = logf
 	cmd.Stderr = logf
@@ -229,7 +244,7 @@ func cmdNetworkRecordStart(args []string) {
 
 	fmt.Printf("Recording started (session %s, daemon PID %d)\n", sessionID, pid)
 	fmt.Printf("Session dir: %s\n", sdir)
-	if len(types) == 1 && strings.EqualFold(types[0], "none") {
+	if len(types) == 1 && strings.EqualFold(types[0], bodyTypeNone) {
 		fmt.Println("Body capture: off")
 	} else {
 		fmt.Printf("Body capture: %s (max %d bytes)\n", strings.Join(types, ","), *maxBodyBytes)
@@ -246,7 +261,6 @@ func cmdNetworkRecordStop(_ []string) {
 
 	pidBytes, err := os.ReadFile(sessionPIDPath(sdir))
 	if err != nil {
-		// no pid file — daemon already gone, just clean up
 		_ = os.Remove(currentSessionPath())
 		fmt.Printf("No active daemon for session %s; cleaned up pointer.\n", name)
 		return
@@ -256,12 +270,10 @@ func cmdNetworkRecordStop(_ []string) {
 		fatal("corrupt pid file at %s: %v", sessionPIDPath(sdir), err)
 	}
 
-	proc, err := os.FindProcess(pid)
-	if err == nil {
+	if proc, err := os.FindProcess(pid); err == nil {
 		_ = proc.Signal(syscall.SIGTERM)
 	}
 
-	// Poll for exit
 	deadline := time.Now().Add(stopWaitTimeout)
 	alive := true
 	for time.Now().Before(deadline) {
@@ -272,7 +284,6 @@ func cmdNetworkRecordStop(_ []string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if alive {
-		// last resort
 		_ = syscall.Kill(pid, syscall.SIGKILL)
 	}
 
@@ -434,57 +445,68 @@ func cmdNetworkGet(args []string) {
 
 // ---------- _netrec daemon (internal) ----------
 
+// cmdNetrecDaemon takes only the session directory; all other config is read
+// from meta.json. Reading from meta lets the daemon survive a parent process
+// that exited mid-detach and keeps the wire interface minimal.
 func cmdNetrecDaemon(args []string) {
-	if len(args) < 2 {
-		fatal("_netrec requires: <session-dir> <debug-url> [<body-types>] [<max-body-bytes>]")
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "_netrec requires <session-dir>")
+		os.Exit(1)
 	}
 	sdir := args[0]
-	debugURL := args[1]
-	bodyTypes := splitAndTrim(getArg(args, 2, strings.Join(defaultBodyTypes, ",")))
-	maxBodyBytes := defaultMaxBodyBytes
-	if v := getArg(args, 3, ""); v != "" {
-		if parsed, err := strconv.ParseInt(v, 10, 64); err == nil && parsed > 0 {
-			maxBodyBytes = parsed
-		}
+
+	meta, err := loadSessionMeta(sdir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "_netrec: load meta from %s failed: %v\n", sdir, err)
+		os.Exit(1)
 	}
 
-	browser := rod.New().ControlURL(debugURL)
+	browser := rod.New().ControlURL(meta.DebugURL)
 	if err := browser.Connect(); err != nil {
 		fmt.Fprintf(os.Stderr, "_netrec: connect failed: %v\n", err)
 		os.Exit(1)
 	}
 
-	bodyTypeSet := make(map[proto.NetworkResourceType]bool, len(bodyTypes))
+	bodyTypeSet := make(map[proto.NetworkResourceType]bool, len(meta.BodyTypes))
 	captureBodies := true
-	if len(bodyTypes) == 1 && strings.EqualFold(bodyTypes[0], "none") {
+	if len(meta.BodyTypes) == 1 && strings.EqualFold(meta.BodyTypes[0], bodyTypeNone) {
 		captureBodies = false
 	} else {
-		for _, t := range bodyTypes {
+		for _, t := range meta.BodyTypes {
 			bodyTypeSet[proto.NetworkResourceType(t)] = true
 		}
 	}
 
-	jsonlPath := sessionJSONLPath(sdir)
-	jf, err := os.OpenFile(jsonlPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	// Pre-create the bodies dir so the hot path doesn't pay an mkdir per fetch.
+	bodyDir := sessionBodyDir(sdir)
+	if err := os.MkdirAll(bodyDir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "_netrec: mkdir bodies failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	jf, err := os.OpenFile(sessionJSONLPath(sdir), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "_netrec: open jsonl failed: %v\n", err)
 		os.Exit(1)
 	}
 	defer jf.Close()
-	jw := json.NewEncoder(jf)
-	var jmu sync.Mutex
 
+	var jmu sync.Mutex
 	emit := func(e netEvent) {
 		e.TS = time.Now().UTC()
+		// Marshal outside the lock; only the file write is serialised.
+		buf, err := json.Marshal(&e)
+		if err != nil {
+			return
+		}
+		buf = append(buf, '\n')
 		jmu.Lock()
-		defer jmu.Unlock()
-		_ = jw.Encode(e)
+		_, _ = jf.Write(buf)
+		jmu.Unlock()
 	}
 
-	// per-request bookkeeping (type lookup for body filtering, URL for failed events)
 	type reqMeta struct {
 		Type proto.NetworkResourceType
-		URL  string
 	}
 	reqs := make(map[proto.NetworkRequestID]reqMeta)
 	sessions := make(map[proto.TargetSessionID]*rod.Page)
@@ -503,6 +525,16 @@ func cmdNetrecDaemon(args []string) {
 		}
 	}
 
+	// Bounded-concurrency body fetcher. The CDP event loop in EachEvent
+	// dispatches handlers serially, so synchronous body fetches inside the
+	// handler would block all subsequent events. Offloading to goroutines lets
+	// the event stream keep flowing; the semaphore caps concurrency so we
+	// don't outrun Chrome's in-memory response cache, and the WaitGroup lets
+	// the daemon drain in-flight fetches on shutdown.
+	bodySem := make(chan struct{}, bodyFetchConcurrency)
+	var bodyWG sync.WaitGroup
+	maxBodyBytes := meta.MaxBodyBytes
+
 	go browser.EachEvent(
 		func(e *proto.TargetTargetCreated) {
 			page, err := browser.PageFromTarget(e.TargetInfo.TargetID)
@@ -511,19 +543,24 @@ func cmdNetrecDaemon(args []string) {
 			}
 			enableNetwork(page)
 		},
+		func(e *proto.TargetDetachedFromTarget) {
+			mu.Lock()
+			delete(sessions, e.SessionID)
+			mu.Unlock()
+		},
 		func(e *proto.NetworkRequestWillBeSent, sid proto.TargetSessionID) {
 			mu.Lock()
-			reqs[e.RequestID] = reqMeta{Type: e.Type, URL: e.Request.URL}
+			reqs[e.RequestID] = reqMeta{Type: e.Type}
 			mu.Unlock()
 			ev := netEvent{
-				Event:    "request",
-				ReqID:    string(e.RequestID),
-				SID:      string(sid),
-				URL:      e.Request.URL,
-				Method:   e.Request.Method,
-				Type:     string(e.Type),
-				ReqHdr:   headersToMap(e.Request.Headers),
-				PostData: e.Request.PostData,
+				Event:          evtRequest,
+				ReqID:          string(e.RequestID),
+				SID:            string(sid),
+				URL:            e.Request.URL,
+				Method:         e.Request.Method,
+				Type:           string(e.Type),
+				RequestHeaders: e.Request.Headers,
+				PostData:       e.Request.PostData,
 			}
 			if e.Initiator != nil {
 				ev.Initiator = string(e.Initiator.Type)
@@ -531,71 +568,72 @@ func cmdNetrecDaemon(args []string) {
 			emit(ev)
 		},
 		func(e *proto.NetworkResponseReceived, sid proto.TargetSessionID) {
-			// keep type fresh in case ResponseReceived has a different type than RequestWillBeSent
 			mu.Lock()
-			meta := reqs[e.RequestID]
-			meta.Type = e.Type
-			reqs[e.RequestID] = meta
+			reqs[e.RequestID] = reqMeta{Type: e.Type}
 			mu.Unlock()
 			ev := netEvent{
-				Event:     "response",
-				ReqID:     string(e.RequestID),
-				SID:       string(sid),
-				URL:       e.Response.URL,
-				Type:      string(e.Type),
-				Status:    e.Response.Status,
-				StatusTxt: e.Response.StatusText,
-				MIME:      e.Response.MIMEType,
-				ResHdr:    headersToMap(e.Response.Headers),
-				RemoteIP:  e.Response.RemoteIPAddress,
+				Event:           evtResponse,
+				ReqID:           string(e.RequestID),
+				SID:             string(sid),
+				URL:             e.Response.URL,
+				Type:            string(e.Type),
+				Status:          e.Response.Status,
+				StatusText:      e.Response.StatusText,
+				MIME:            e.Response.MIMEType,
+				ResponseHeaders: e.Response.Headers,
+				RemoteIP:        e.Response.RemoteIPAddress,
 			}
 			if e.Response.RemotePort != nil {
-				ev.RemotePrt = *e.Response.RemotePort
+				ev.RemotePort = *e.Response.RemotePort
 			}
 			emit(ev)
 		},
 		func(e *proto.NetworkLoadingFinished, sid proto.TargetSessionID) {
+			reqID := e.RequestID
+			encLen := int64(e.EncodedDataLength)
+			sidStr := string(sid)
+
 			mu.Lock()
-			meta, ok := reqs[e.RequestID]
+			info, hasMeta := reqs[reqID]
+			delete(reqs, reqID)
 			page := sessions[sid]
 			mu.Unlock()
 
-			ev := netEvent{
-				Event:     "loaded",
-				ReqID:     string(e.RequestID),
-				SID:       string(sid),
-				EncodedLn: int64(e.EncodedDataLength),
+			shouldCapture := captureBodies && hasMeta && bodyTypeSet[info.Type] && page != nil
+			if !shouldCapture {
+				emit(netEvent{
+					Event:         evtLoaded,
+					ReqID:         string(reqID),
+					SID:           sidStr,
+					EncodedLength: encLen,
+				})
+				return
 			}
 
-			if captureBodies && ok && bodyTypeSet[meta.Type] && page != nil {
-				res, err := proto.NetworkGetResponseBody{RequestID: e.RequestID}.Call(page)
-				if err == nil {
-					var raw []byte
-					if res.Base64Encoded {
-						raw, _ = base64.StdEncoding.DecodeString(res.Body)
-					} else {
-						raw = []byte(res.Body)
-					}
-					trunc := false
-					if int64(len(raw)) > maxBodyBytes {
-						raw = raw[:maxBodyBytes]
-						trunc = true
-					}
-					bodyRel := filepath.Join(sessionBodiesDir, string(e.RequestID))
-					bodyAbs := filepath.Join(sdir, bodyRel)
-					_ = os.MkdirAll(filepath.Dir(bodyAbs), 0755)
-					if werr := os.WriteFile(bodyAbs, raw, 0644); werr == nil {
-						ev.BodyPath = bodyRel
-						ev.BodySize = int64(len(raw))
-						ev.BodyTrunc = trunc
-					}
+			bodyWG.Add(1)
+			go func() {
+				defer bodyWG.Done()
+				bodySem <- struct{}{}
+				defer func() { <-bodySem }()
+
+				ev := netEvent{
+					Event:         evtLoaded,
+					ReqID:         string(reqID),
+					SID:           sidStr,
+					EncodedLength: encLen,
 				}
-			}
-			emit(ev)
+				if res, err := (proto.NetworkGetResponseBody{RequestID: reqID}).Call(page); err == nil {
+					writeBodyFile(bodyDir, string(reqID), res, maxBodyBytes, &ev)
+				}
+				emit(ev)
+			}()
 		},
 		func(e *proto.NetworkLoadingFailed, sid proto.TargetSessionID) {
+			mu.Lock()
+			delete(reqs, e.RequestID)
+			mu.Unlock()
 			emit(netEvent{
-				Event:    "failed",
+				Event:    evtFailed,
 				ReqID:    string(e.RequestID),
 				SID:      string(sid),
 				Type:     string(e.Type),
@@ -608,7 +646,44 @@ func cmdNetrecDaemon(args []string) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	<-sigCh
+	bodyWG.Wait()
 	_ = jf.Sync()
+}
+
+// writeBodyFile persists the captured response body and stamps the result onto
+// ev. Truncates to maxBytes. base64-encoded bodies are decoded first. Errors
+// are swallowed — the loaded event still gets emitted, just without body
+// fields, so callers can see which requests had bodies skipped.
+func writeBodyFile(bodyDir, reqID string, res *proto.NetworkGetResponseBodyResult, maxBytes int64, ev *netEvent) {
+	var data []byte
+	var trunc bool
+	if res.Base64Encoded {
+		decoded, err := base64.StdEncoding.DecodeString(res.Body)
+		if err != nil {
+			return
+		}
+		if int64(len(decoded)) > maxBytes {
+			decoded = decoded[:maxBytes]
+			trunc = true
+		}
+		data = decoded
+	} else {
+		// Slice the string before the []byte copy to avoid an oversized alloc.
+		s := res.Body
+		if int64(len(s)) > maxBytes {
+			s = s[:maxBytes]
+			trunc = true
+		}
+		data = []byte(s)
+	}
+	path := filepath.Join(bodyDir, reqID)
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return
+	}
+	rel := filepath.Join(sessionBodiesDir, reqID)
+	ev.BodyPath = rel
+	ev.BodySize = int64(len(data))
+	ev.BodyTruncated = trunc
 }
 
 // ---------- row summarisation for list/get ----------
@@ -627,7 +702,7 @@ type netRow struct {
 }
 
 func summarizeEvents(events []netEvent) []netRow {
-	byID := make(map[string]*netRow)
+	byID := make(map[string]*netRow, len(events)/3+1)
 	requestTS := make(map[string]time.Time)
 	for _, e := range events {
 		r, ok := byID[e.ReqID]
@@ -636,7 +711,7 @@ func summarizeEvents(events []netEvent) []netRow {
 			byID[e.ReqID] = r
 		}
 		switch e.Event {
-		case "request":
+		case evtRequest:
 			requestTS[e.ReqID] = e.TS
 			r.URL = e.URL
 			r.Method = e.Method
@@ -644,12 +719,12 @@ func summarizeEvents(events []netEvent) []netRow {
 			if r.TS.IsZero() {
 				r.TS = e.TS
 			}
-		case "response":
+		case evtResponse:
 			r.Status = e.Status
 			if r.Type == "" {
 				r.Type = e.Type
 			}
-		case "loaded":
+		case evtLoaded:
 			if e.BodyPath != "" {
 				r.HasBody = true
 				r.BodySize = e.BodySize
@@ -657,7 +732,7 @@ func summarizeEvents(events []netEvent) []netRow {
 			if start, ok := requestTS[e.ReqID]; ok {
 				r.DurationMS = e.TS.Sub(start).Milliseconds()
 			}
-		case "failed":
+		case evtFailed:
 			r.Error = e.Error
 		}
 	}
@@ -729,7 +804,6 @@ func resolveSessionDir(name string) (string, string, error) {
 	if cur, p, err := readCurrentSession(); err == nil {
 		return p, cur, nil
 	}
-	// fall back to most recent dir under netDir()
 	entries, err := os.ReadDir(netDir())
 	if err != nil {
 		return "", "", fmt.Errorf("no recordings found at %s", netDir())
@@ -773,32 +847,14 @@ func readSessionEvents(sdir string) ([]netEvent, error) {
 	return out, sc.Err()
 }
 
+// countJSONL counts newline-terminated records via a single ReadFile +
+// bytes.Count. Faster than running a bufio.Scanner just to tally lines.
 func countJSONL(p string) int {
-	f, err := os.Open(p)
+	data, err := os.ReadFile(p)
 	if err != nil {
 		return 0
 	}
-	defer f.Close()
-	n := 0
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 1024*1024), 16*1024*1024)
-	for sc.Scan() {
-		if len(sc.Bytes()) > 0 {
-			n++
-		}
-	}
-	return n
-}
-
-func headersToMap(h proto.NetworkHeaders) map[string]interface{} {
-	if h == nil {
-		return nil
-	}
-	out := make(map[string]interface{}, len(h))
-	for k, v := range h {
-		out[k] = v
-	}
-	return out
+	return bytes.Count(data, []byte{'\n'})
 }
 
 func splitAndTrim(s string) []string {
@@ -822,6 +878,9 @@ func containsCI(list []string, v string) bool {
 	return false
 }
 
+// makeStatusMatcher returns a predicate for the --status filter spec. Empty
+// spec matches all. Non-empty spec that fails to parse anything matches none
+// (no silent accept-everything for typos like "abc").
 func makeStatusMatcher(spec string) func(int) bool {
 	if spec == "" {
 		return func(int) bool { return true }
@@ -852,15 +911,6 @@ func makeStatusMatcher(spec string) func(int) bool {
 				return true
 			}
 		}
-		return len(exact) == 0 && len(ranges) == 0
+		return false
 	}
 }
-
-func getArg(args []string, idx int, fallback string) string {
-	if idx >= len(args) {
-		return fallback
-	}
-	return args[idx]
-}
-
-var _ io.Reader = (*os.File)(nil) // pin io import; used for bufio.Scanner buffer sizing context
