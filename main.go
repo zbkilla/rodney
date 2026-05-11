@@ -207,6 +207,10 @@ func main() {
 	switch cmd {
 	case "_proxy":
 		cmdInternalProxy(args) // hidden: runs the auth proxy helper
+	case "_netrec":
+		cmdNetrecDaemon(args) // hidden: runs the network capture daemon
+	case "network":
+		cmdNetwork(args)
 	case "start":
 		cmdStart(args)
 	case "connect":

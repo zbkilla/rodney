@@ -61,6 +61,21 @@ Accessibility:
   rodney ax-find [--name N] [--role R] [--json]  Find accessible nodes
   rodney ax-node <selector> [--json]        Show accessibility info for element
 
+Network capture (record CDP requests/responses while you drive the browser):
+  rodney network record start [--body-types XHR,Fetch] [--max-body-bytes N]
+                                  Spawn the recorder daemon. Captures every
+                                  XHR/Fetch/WebSocket etc. to ~/.rodney/net/<id>/.
+  rodney network record stop      Signal the daemon to flush + exit.
+  rodney network status           Show active recording session and event count.
+  rodney network list [--type XHR,Fetch] [--status 200-299]
+                        [--url-contains S] [--since SEC] [--limit N]
+                        [--format table|json|tsv] [--session ID]
+                                  Summarised request table for the active or
+                                  most-recent session.
+  rodney network get <reqid> [--body PATH] [--session ID]
+                                  Full JSON for a request + optional body
+                                  dump. --body - writes body to stdout.
+
 Options:
   --local                         Use directory-scoped session (./.rodney/)
   --global                        Use global session (~/.rodney/)
